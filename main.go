@@ -22,10 +22,6 @@ import (
 
 const cliName = "lightsailctl"
 
-// version is overridden at build time by goreleaser's default ldflag
-// `-X main.version={{.Version}}`.
-var version = "v0.0.0-dev"
-
 func main() {
 	log.SetFlags(0)
 
@@ -38,11 +34,12 @@ func main() {
 	}
 
 	g := &cli.Globals{}
-	root := cli.Build(cliName, "Amazon Lightsail CLI", registry.Default(), g)
+	reg := registry.New()
+	root := cli.Build(cliName, "Amazon Lightsail CLI", reg, g)
 	root.Version = internal.Version().String()
 
 	runTUI := func(cmd *cobra.Command, _ []string) error {
-		return tui.Run(cmd.Context(), registry.Default(), tui.Options{Name: cliName, Version: internal.Version().String()})
+		return tui.Run(cmd.Context(), reg, tui.Options{Name: cliName, Version: internal.Version().String()})
 	}
 	root.RunE = runTUI
 	root.AddCommand(&cobra.Command{
