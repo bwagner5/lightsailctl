@@ -10,7 +10,7 @@ import (
 )
 
 // Managed by ldflags -X in .goreleaser.yaml.
-var versionString = "v1.0.7"
+var versionString = "v0.0.0-dev"
 
 func Version() Semver { return Semver(versionString) }
 

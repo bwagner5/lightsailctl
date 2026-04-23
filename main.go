@@ -5,28 +5,57 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"log"
 	"os"
+	"os/signal"
 	"regexp"
+
+	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/ui/cli"
+	"github.com/bwagner5/triad/pkg/ui/tui"
+	"github.com/spf13/cobra"
 
 	"github.com/aws/lightsailctl/internal"
 	"github.com/aws/lightsailctl/internal/plugin"
 )
 
+const cliName = "lightsailctl"
+
+// version is overridden at build time by goreleaser's default ldflag
+// `-X main.version={{.Version}}`.
+var version = "v0.0.0-dev"
+
 func main() {
 	log.SetFlags(0)
 
+	// Preserve the AWS CLI plugin contract: when invoked with --plugin,
+	// dispatch to the existing plugin handler and exit.
 	pluginPattern := regexp.MustCompile(`^--?plugin$`)
-	getverPattern := regexp.MustCompile(`^--?version$`)
-
-	switch {
-	case len(os.Args) > 1 && pluginPattern.MatchString(os.Args[1]):
+	if len(os.Args) > 1 && pluginPattern.MatchString(os.Args[1]) {
 		pluginMain(os.Args[0]+" "+os.Args[1], os.Args[2:])
-	case len(os.Args) > 1 && getverPattern.MatchString(os.Args[1]):
-		fmt.Println(internal.Version())
-	default:
-		log.Fatalf("%s can't be used directly, it is meant to be invoked by AWS CLI", os.Args[0])
+		return
+	}
+
+	g := &cli.Globals{}
+	root := cli.Build(cliName, "Amazon Lightsail CLI", registry.Default(), g)
+	root.Version = internal.Version().String()
+
+	runTUI := func(cmd *cobra.Command, _ []string) error {
+		return tui.Run(cmd.Context(), registry.Default(), tui.Options{Name: cliName, Version: internal.Version().String()})
+	}
+	root.RunE = runTUI
+	root.AddCommand(&cobra.Command{
+		Use:     "tui",
+		Short:   "launch the full-screen TUI",
+		GroupID: "interface",
+		RunE:    runTUI,
+	})
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	if err := root.ExecuteContext(ctx); err != nil {
+		os.Exit(1)
 	}
 }
 
