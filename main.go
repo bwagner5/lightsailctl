@@ -44,6 +44,16 @@ func main() {
 	root.AddCommand(cli.AliasOp(reg, g, "app", "deploy", "deploy",
 		"deploy current dir to an app/env"))
 
+	// Hang `app local` off the triad-built `app` command. `local` is a
+	// nested command group that triad doesn't express natively; these
+	// verbs run on the Lightsail instance and are invoked over SSH.
+	for _, c := range root.Commands() {
+		if c.Name() == "app" {
+			c.AddCommand(app.LocalCommand())
+			break
+		}
+	}
+
 	runTUI := func(cmd *cobra.Command, _ []string) error {
 		return tui.Run(cmd.Context(), reg, tui.Options{Name: cliName, Version: internal.Version().String()})
 	}

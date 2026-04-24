@@ -1,0 +1,290 @@
+package app
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/bwagner5/triad/pkg/registry"
+
+	"github.com/aws/lightsailctl/pkg/config"
+	"github.com/aws/lightsailctl/pkg/lightsail"
+	"github.com/aws/lightsailctl/pkg/names"
+)
+
+// createOp implements `lightsailctl app create`. It is also invoked by the
+// deploy saga when no env bucket exists for the configured app.
+//
+// Flow:
+//  1. Create app-config bucket (ls--<acct>--<app>)  [idempotent]
+//  2. Create env bucket        (ls--<acct>--<app>--<env>)
+//  3. Tag target instance      ls:app:<app>:<env> = "true"
+//  4. Grant instance bucket access (IMDS-based, no static keys)
+//  5. Wait for propagation (30s; SetResourceAccessForBucket is eventually
+//     consistent per hack/test-bucket-instance-access.sh)
+//  6. SCP lightsailctl binary to the instance at /usr/local/bin
+//  7. SSH `lightsailctl app local install ...`
+//  8. SSH `lightsailctl app local up ...`
+//  9. Save lightsail.conf in cwd and print the non-interactive command.
+func createOp(s *store) registry.Operation {
+	return registry.Operation{
+		Name: "create", Key: "c", Short: "create a new Lightsail application",
+		Fields: []registry.Field{
+			{Flag: "name", Short: "n", Help: "app name", Default: names.Random(), Required: true},
+			{Flag: "env", Short: "e", Help: "environment", Default: "dev"},
+			{Flag: "region", Help: "AWS region", Required: true, Suggest: regionSuggest(s)},
+			{Flag: "instance", Help: "target Lightsail instance", Required: true, Suggest: instanceSuggest(s)},
+			{Flag: "agent-path", Help: "path to a lightsailctl binary to scp to the instance (linux/amd64)", Required: true},
+		},
+		Steps: []registry.Step{
+			{Label: "Verify agent binary exists", Do: verifyAgentStep},
+			{Label: "Create app-config bucket", Do: createAppBucketStep(s)},
+			{Label: "Create env bucket", Do: createEnvBucketStep(s)},
+			{Label: "Tag target instance", Do: tagInstanceStep(s), Undo: untagInstanceUndo(s)},
+			{Label: "Grant instance bucket access", Do: grantAccessStep(s), Undo: revokeAccessUndo(s)},
+			{Label: "Wait for propagation (30s)", Do: sleepStep(30 * time.Second)},
+			{Label: "SCP agent binary to instance", Do: scpAgentStep(s)},
+			{Label: "Install watcher on instance", Do: remoteInstallStep(s)},
+			{Label: "Start watcher", Do: remoteUpStep(s)},
+			{Label: "Save lightsail.conf", Do: saveConfigStep},
+		},
+	}
+}
+
+// ── Suggests ──────────────────────────────────────────────────────────
+
+func regionSuggest(s *store) func(context.Context) ([]registry.Choice, error) {
+	return func(ctx context.Context) ([]registry.Choice, error) {
+		// Small curated list; FetchRegions would be nicer but requires ec2:DescribeRegions.
+		defs := []string{
+			"us-east-1", "us-east-2", "us-west-1", "us-west-2",
+			"eu-west-1", "eu-central-1", "ap-southeast-1", "ap-southeast-2",
+			"ap-northeast-1", "ap-south-1",
+		}
+		out := make([]registry.Choice, 0, len(defs))
+		for _, r := range defs {
+			out = append(out, registry.Choice{Value: r, Display: r})
+		}
+		return out, nil
+	}
+}
+
+func instanceSuggest(s *store) func(context.Context) ([]registry.Choice, error) {
+	return func(ctx context.Context) ([]registry.Choice, error) {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return nil, err
+		}
+		insts, err := c.ListInstances(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]registry.Choice, 0, len(insts))
+		for _, i := range insts {
+			out = append(out, registry.Choice{
+				Value: i.Name, Display: fmt.Sprintf("%-30s %-15s %s", i.Name, i.State, i.IP),
+			})
+		}
+		return out, nil
+	}
+}
+
+// ── Steps ─────────────────────────────────────────────────────────────
+
+func verifyAgentStep(_ context.Context, st *registry.State) error {
+	p := st.Input.Get("agent-path")
+	fi, err := os.Stat(p)
+	if err != nil {
+		return fmt.Errorf("agent binary not found at %s: %w", p, err)
+	}
+	if fi.IsDir() || fi.Size() == 0 {
+		return fmt.Errorf("agent binary at %s is not a regular file", p)
+	}
+	return nil
+}
+
+func createAppBucketStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		acct, err := c.AccountID(ctx)
+		if err != nil {
+			return err
+		}
+		st.Data["acct"] = acct
+		return c.CreateBucket(ctx, lightsail.AppBucketName(acct, st.Input.Get("name")))
+	}
+}
+
+func createEnvBucketStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		acct := st.Data["acct"].(string)
+		bucket := lightsail.EnvBucketName(acct, st.Input.Get("name"), st.Input.Get("env"))
+		if err := c.CreateBucket(ctx, bucket); err != nil {
+			return err
+		}
+		st.Data["bucket"] = bucket
+		return nil
+	}
+}
+
+func tagInstanceStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		key := lightsail.TagPrefix + st.Input.Get("name") + ":" + st.Input.Get("env")
+		return c.TagInstance(ctx, st.Input.Get("instance"), key, "true")
+	}
+}
+
+func untagInstanceUndo(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c := mustClient(ctx, s)
+		if c == nil {
+			return nil
+		}
+		_, _ = c.UntagInstancesForApp(ctx, st.Input.Get("name"))
+		return nil
+	}
+}
+
+func grantAccessStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		return c.SetBucketAccessForInstance(ctx,
+			st.Data["bucket"].(string), st.Input.Get("instance"), true)
+	}
+}
+
+func revokeAccessUndo(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		bucket, ok := st.Data["bucket"].(string)
+		if !ok {
+			return nil
+		}
+		c := mustClient(ctx, s)
+		if c == nil {
+			return nil
+		}
+		_ = c.SetBucketAccessForInstance(ctx, bucket, st.Input.Get("instance"), false)
+		return nil
+	}
+}
+
+func sleepStep(d time.Duration) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, _ *registry.State) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(d):
+			return nil
+		}
+	}
+}
+
+func scpAgentStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		creds, err := c.GetInstanceSSH(ctx, st.Input.Get("instance"))
+		if err != nil {
+			return err
+		}
+		defer creds.Remove()
+
+		// 1) scp to /tmp, 2) sudo mv into /usr/local/bin, 3) smoke-test --version.
+		if err := creds.SCPTo(ctx, st.Input.Get("agent-path"), "/tmp/lightsailctl", false); err != nil {
+			return err
+		}
+		install := "sudo mv /tmp/lightsailctl /usr/local/bin/lightsailctl && sudo chmod +x /usr/local/bin/lightsailctl && /usr/local/bin/lightsailctl --version"
+		if out, err := creds.SSHRun(ctx, install); err != nil {
+			return fmt.Errorf("install/verify: %s: %w", out, err)
+		}
+		return nil
+	}
+}
+
+func remoteInstallStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		creds, err := c.GetInstanceSSH(ctx, st.Input.Get("instance"))
+		if err != nil {
+			return err
+		}
+		defer creds.Remove()
+		cmd := fmt.Sprintf(
+			"sudo /usr/local/bin/lightsailctl app local install --app %s --env %s --bucket %s --region %s --instance %s",
+			st.Input.Get("name"), st.Input.Get("env"),
+			st.Data["bucket"].(string), st.Input.Get("region"),
+			st.Input.Get("instance"))
+		if out, err := creds.SSHRun(ctx, cmd); err != nil {
+			return fmt.Errorf("remote install: %s: %w", out, err)
+		}
+		return nil
+	}
+}
+
+func remoteUpStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		creds, err := c.GetInstanceSSH(ctx, st.Input.Get("instance"))
+		if err != nil {
+			return err
+		}
+		defer creds.Remove()
+		cmd := fmt.Sprintf("sudo /usr/local/bin/lightsailctl app local up --app %s --env %s",
+			st.Input.Get("name"), st.Input.Get("env"))
+		if out, err := creds.SSHRun(ctx, cmd); err != nil {
+			return fmt.Errorf("remote up: %s: %w", out, err)
+		}
+		return nil
+	}
+}
+
+func saveConfigStep(ctx context.Context, st *registry.State) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	cfg := &config.Config{
+		App: st.Input.Get("name"), Env: st.Input.Get("env"), Region: st.Input.Get("region"),
+	}
+	p := filepath.Join(cwd, config.Filename)
+	if err := cfg.Save(p); err != nil {
+		return err
+	}
+	st.Data["conf_path"] = p
+	return nil
+}
+
+// mustClient panics if the client can't be built; only for Undo paths where
+// we're already in a failure state and can't do much else. Returns nil only
+// when there's nothing we could have done anyway.
+func mustClient(ctx context.Context, s *store) *lightsail.Client {
+	c, err := s.ensure(ctx)
+	if err != nil {
+		return nil
+	}
+	return c
+}

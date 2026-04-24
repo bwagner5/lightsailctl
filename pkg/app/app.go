@@ -154,9 +154,11 @@ func Resource(region string) registry.Resource {
 		Fields:  fields,
 		Store:   st,
 		Operations: map[string]registry.Operation{
+			"create": createOp(st),
 			"status": statusOp(st, suggest),
 			"delete": deleteOp(st, suggest),
 			"deploy": deployOp(st, suggest),
+			"logs":   logsOp(st, suggest),
 		},
 	}
 }

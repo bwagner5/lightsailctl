@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/lightsail"
@@ -85,4 +86,41 @@ func SSHOpts(keyPath string) []string {
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
 	}
+}
+
+// SSHRun executes a shell command on the remote instance and returns the
+// combined stdout+stderr. Intended for small, non-interactive commands.
+func (s *SSHCredentials) SSHRun(ctx context.Context, cmdStr string) ([]byte, error) {
+	args := append(SSHOpts(s.KeyPath), s.Username+"@"+s.Host, cmdStr)
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	return cmd.CombinedOutput()
+}
+
+// SCPTo copies localPath to remotePath on the instance (via scp). Creates
+// remote parent dirs via a preceding ssh mkdir -p when mkdirParent is true.
+func (s *SSHCredentials) SCPTo(ctx context.Context, localPath, remotePath string, mkdirParent bool) error {
+	if mkdirParent {
+		parent := remoteDir(remotePath)
+		if parent != "" && parent != "/" {
+			if out, err := s.SSHRun(ctx, fmt.Sprintf("sudo mkdir -p %s && sudo chmod 755 %s", parent, parent)); err != nil {
+				return fmt.Errorf("mkdir %s: %s: %w", parent, out, err)
+			}
+		}
+	}
+	args := append(SSHOpts(s.KeyPath), localPath, s.Username+"@"+s.Host+":"+remotePath)
+	cmd := exec.CommandContext(ctx, "scp", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("scp %s: %s: %w", localPath, out, err)
+	}
+	return nil
+}
+
+// remoteDir is path.Dir without the path import dance.
+func remoteDir(p string) string {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '/' {
+			return p[:i]
+		}
+	}
+	return ""
 }

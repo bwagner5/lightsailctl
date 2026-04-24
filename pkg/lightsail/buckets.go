@@ -52,3 +52,27 @@ func (c *Client) ListAppBuckets(ctx context.Context) ([]Bucket, error) {
 	}
 	return out, nil
 }
+
+// CreateBucket creates a Lightsail bucket with the small bundle. No-op (nil
+// error) if the bucket already exists.
+func (c *Client) CreateBucket(ctx context.Context, name string) error {
+	bundle := DefaultBundle
+	_, err := c.ls.CreateBucket(ctx, &lightsail.CreateBucketInput{
+		BucketName: &name,
+		BundleId:   &bundle,
+	})
+	if err != nil && isAlreadyExists(err) {
+		return nil
+	}
+	return err
+}
+
+func isAlreadyExists(err error) bool {
+	s := err.Error()
+	for _, needle := range []string{"already exists", "Bucket with name"} {
+		if strings.Contains(strings.ToLower(s), strings.ToLower(needle)) {
+			return true
+		}
+	}
+	return false
+}

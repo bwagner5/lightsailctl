@@ -47,6 +47,18 @@ func (c *Client) GetInstance(ctx context.Context, name string) (*Instance, error
 	return &i, nil
 }
 
+// TagInstance adds a tag key=value to the instance.
+func (c *Client) TagInstance(ctx context.Context, instance, key, value string) error {
+	_, err := c.ls.TagResource(ctx, &lightsail.TagResourceInput{
+		ResourceName: aws.String(instance),
+		Tags: []lstypes.Tag{{
+			Key:   aws.String(key),
+			Value: aws.String(value),
+		}},
+	})
+	return err
+}
+
 func toInstance(in *lstypes.Instance) Instance {
 	out := Instance{
 		Name: aws.ToString(in.Name),
