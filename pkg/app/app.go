@@ -156,6 +156,7 @@ func Resource(region string) registry.Resource {
 		Operations: map[string]registry.Operation{
 			"status": statusOp(st, suggest),
 			"delete": deleteOp(st, suggest),
+			"deploy": deployOp(st, suggest),
 		},
 	}
 }

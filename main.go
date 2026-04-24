@@ -40,6 +40,10 @@ func main() {
 	root := cli.Build(cliName, "Amazon Lightsail CLI", reg, g)
 	root.Version = internal.Version().String()
 
+	// Top-level `lightsailctl deploy` runs `app deploy`.
+	root.AddCommand(cli.AliasOp(reg, g, "app", "deploy", "deploy",
+		"deploy current dir to an app/env"))
+
 	runTUI := func(cmd *cobra.Command, _ []string) error {
 		return tui.Run(cmd.Context(), reg, tui.Options{Name: cliName, Version: internal.Version().String()})
 	}
