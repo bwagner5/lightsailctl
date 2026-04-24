@@ -1,22 +1,94 @@
-# Amazon Lightsail CLI Extensions
+# Amazon Lightsail CLI
 
-This project is the source code of `lightsailctl`, a tool that
-augments [Amazon Lightsail features in AWS CLI.][lscli]
+`lightsailctl` is a first-class CLI and TUI for Amazon Lightsail. It also
+serves as an [AWS CLI extension][lscli] (`aws lightsail push-container-image`
+shells out to it).
 
-## Usage
+## Two faces
 
-`lightsailctl` is executed **automatically** by AWS CLI when certain
-subcommands are used, such as `aws lightsail push-container-image`.
+**1. First-class CLI** — deploy Docker Compose applications to a Lightsail
+instance with one command:
+
+```sh
+lightsailctl deploy                 # deploy current dir to an app/env
+lightsailctl                        # launch the TUI dashboard
+lightsailctl app list               # list applications
+lightsailctl app status --name foo  # show health + endpoints
+lightsailctl app logs --name foo    # tail docker compose logs over SSH
+lightsailctl app delete --name foo  # tear down (buckets, tags, firewall)
+lightsailctl app --help             # everything else
+```
+
+Every command missing a required flag launches an inline wizard (suppress
+with `-y` for CI).
+
+**2. AWS-CLI plugin** — invoked automatically by the AWS CLI:
 
 ```sh
 $ lightsailctl --plugin -h
-
 Usage of `lightsailctl --plugin`:
   --input payload
         plugin payload
   --input-stdin
         receive plugin payload on stdin
 ```
+
+## Applications
+
+A Lightsail Application is a client-side aggregate over Lightsail buckets and
+instances. The model lives entirely in this CLI:
+
+- **Buckets.** One app-config bucket `ls--<acct>--<app>` plus one env bucket
+  per environment `ls--<acct>--<app>--<env>`. Deploy tarballs land in
+  `s3://<env-bucket>/deploy/<unix>-<sha>.tar.gz`.
+- **Instance tags.** Target instances are marked with `ls:app:<app>:<env> =
+  true`.
+- **Status files.** The on-instance watcher writes
+  `<instance>_status.json` to the env bucket on every deploy or every minute,
+  whichever comes first.
+- **On-instance layout.** `/opt/lightsail/<app>/<env>/current` holds the
+  deployed source; the watcher runs under a systemd unit
+  `lightsail-watch-<app>-<env>.service`.
+
+The watcher binary is `lightsailctl` itself, invoked on the instance as
+`lightsailctl app local watch`. No separate daemon to ship.
+
+## Creating an app
+
+```sh
+lightsailctl app create \
+  --name my-web-app \
+  --env dev \
+  --region us-east-2 \
+  --instance my-lightsail-instance \
+  --agent-path ./dist/lightsailctl_linux_amd64_v1/lightsailctl
+```
+
+`--agent-path` must point at a **linux/amd64** `lightsailctl` binary. Until
+we publish releases, build one locally:
+
+```sh
+GOOS=linux GOARCH=amd64 go build -o /tmp/lightsailctl-linux .
+lightsailctl app create --agent-path /tmp/lightsailctl-linux ...
+```
+
+On success the wizard writes `./lightsail.conf` so subsequent
+`lightsailctl deploy` calls pick up the app/env/region without flags.
+
+## `lightsail.conf`
+
+Minimal YAML, one per project:
+
+```yaml
+app: my-web-app
+env: dev
+region: us-east-2
+ignore:          # paths excluded from the deploy tarball (additive to
+  - .venv        # built-ins: .git, .lightsail, node_modules, .DS_Store)
+  - target
+```
+
+Discovery: `Find()` walks up from the current directory, just like git.
 
 ## Installing
 
@@ -65,6 +137,27 @@ make ci        # lint + test (same as CI)
 make snapshot  # build local release artifacts via goreleaser (dist/)
 make help      # list targets
 ```
+
+### Integration test
+
+An end-to-end integration test lives at `test/integ/`. It drives the real
+CLI against real AWS resources (creates a bucket, uploads a deploy, hits the
+deployed endpoint, deletes everything). It requires an existing Lightsail
+instance with Docker installed.
+
+```sh
+GOOS=linux GOARCH=amd64 go build -o /tmp/lightsailctl-linux .
+
+LS_INTEG_INSTANCE=my-inst \
+LS_INTEG_REGION=us-east-2 \
+LS_INTEG_AGENT_PATH=/tmp/lightsailctl-linux \
+  go test -tags=integ -v -timeout=20m ./test/integ/...
+```
+
+The test is gated behind `-tags=integ` so `make ci` ignores it. Each phase
+(`Create`, `Deploy`, `Status`, `Delete`) is a `t.Run` subtest so you can
+target one with e.g. `-run TestEndToEnd/Deploy` after a successful earlier
+run. Set `LS_INTEG_KEEP=1` to skip teardown.
 
 ## Under The Hood
 
