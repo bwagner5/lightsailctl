@@ -125,9 +125,9 @@ func sortedCSV(csv string) string {
 	return strings.Join(parts, ",")
 }
 
-// Resource builds the triad Resource. Phase 0: read-only + zero operations.
-// Operations are layered on in later phases via functional options that
-// future resource files (op_*.go) add.
+// Resource builds the triad Resource. Operations layer in as we port each
+// phase: Phase 1 adds status+delete; Phase 3 adds deploy; Phase 4 adds
+// create; Phase 5 adds logs+local.
 //
 // The client is built lazily on first Store call so `--help` / `--version`
 // and offline TUI launches never touch AWS config.
@@ -144,13 +144,18 @@ func Resource(region string) registry.Resource {
 		{Name: "Bucket", Flag: "bucket", Help: "app config bucket",
 			Table: registry.TableHint{Header: "BUCKET", Wide: true}},
 	}
+	st := &store{region: region}
+	suggest := registry.SuggestFrom(st, fields, "name")
 	return registry.Resource{
-		Name:       "app",
-		Plural:     "apps",
-		Aliases:    []string{"application", "applications"},
-		Short:      "manage Lightsail Applications",
-		Fields:     fields,
-		Store:      &store{region: region},
-		Operations: map[string]registry.Operation{},
+		Name:    "app",
+		Plural:  "apps",
+		Aliases: []string{"application", "applications"},
+		Short:   "manage Lightsail Applications",
+		Fields:  fields,
+		Store:   st,
+		Operations: map[string]registry.Operation{
+			"status": statusOp(st, suggest),
+			"delete": deleteOp(st, suggest),
+		},
 	}
 }
