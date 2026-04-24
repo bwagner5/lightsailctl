@@ -18,6 +18,7 @@ import (
 
 	"github.com/aws/lightsailctl/internal"
 	"github.com/aws/lightsailctl/internal/plugin"
+	"github.com/aws/lightsailctl/pkg/app"
 )
 
 const cliName = "lightsailctl"
@@ -35,6 +36,7 @@ func main() {
 
 	g := &cli.Globals{}
 	reg := registry.New()
+	reg.Register(app.Resource(os.Getenv("AWS_REGION")))
 	root := cli.Build(cliName, "Amazon Lightsail CLI", reg, g)
 	root.Version = internal.Version().String()
 

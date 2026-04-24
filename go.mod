@@ -78,3 +78,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gotest.tools/v3 v3.5.1 // indirect
 )
+
+// Local triad with Operation.Aliases + cli.AliasOp. Drop when those changes
+// are released upstream.
+replace github.com/bwagner5/triad => ../triad
