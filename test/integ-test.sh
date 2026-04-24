@@ -129,7 +129,13 @@ check_cmd make       "Install GNU make (part of build-essential / Xcode Command 
 if command -v aws >/dev/null 2>&1; then
   if aws sts get-caller-identity >/dev/null 2>&1; then
     IDENTITY=$(aws sts get-caller-identity --query 'Arn' --output text)
-    pass "AWS credentials OK: $IDENTITY"
+    if [[ "$IDENTITY" == *AmazonLightsailInstanceRole* ]]; then
+      fail "Detected Lightsail instance role: $IDENTITY"
+      fail "  This role cannot manage Lightsail container services. Run with credentials instead."
+      preflight_ok=false
+    else
+      pass "AWS credentials OK: $IDENTITY"
+    fi
   else
     fail "AWS credentials not configured or invalid. Run: aws configure   (or set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN)"
     preflight_ok=false
