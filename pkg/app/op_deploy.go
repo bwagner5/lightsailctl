@@ -94,9 +94,9 @@ func resolveStep(s *store) func(context.Context, *registry.State) error {
 }
 
 // ensureAppStep: the env bucket must exist or we can't deploy. When it's
-// missing, ask the user (via registry.NeedInput) for the extra inputs the
-// create flow needs, then run create inline on retry. When global, find
-// the bucket across regions and pin the store.
+// missing, ask the user (via registry.NeedInput) for just the inputs the
+// create flow needs — instance + agent-path. The region is INFERRED from
+// the picked instance (the user never picks a region separately).
 func ensureAppStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		c, err := s.ensure(ctx)
@@ -118,17 +118,43 @@ func ensureAppStep(s *store) func(context.Context, *registry.State) error {
 		// Bucket missing. Do we have the inputs to create it?
 		needInstance := st.Input.Get("instance") == ""
 		needAgent := st.Input.Get("agent-path") == ""
-		needRegion := st.Input.Get("region") == ""
-		if needInstance || needAgent || needRegion {
-			return needInputForCreate(s, needRegion, needInstance, needAgent, st.Input.Get("name"), st.Input.Get("env"))
+		if needInstance || needAgent {
+			return needInputForCreate(needInstance, needAgent, s, st.Input.Get("name"), st.Input.Get("env"))
 		}
-		// Inputs are filled; run create inline.
+		// Inputs are filled. Derive the region from the picked instance.
+		if st.Input.Get("region") == "" {
+			region, rerr := regionOfInstance(ctx, c, st.Input.Get("instance"))
+			if rerr != nil {
+				return rerr
+			}
+			st.Input["region"] = region
+		}
+		// Run create inline.
 		if err := runCreateInline(ctx, s, st); err != nil {
 			return err
 		}
 		st.Data["bucket"] = lightsail.EnvBucketName(acct, st.Input.Get("name"), st.Input.Get("env"))
 		return nil
 	}
+}
+
+// regionOfInstance finds the AWS region of a Lightsail instance by its
+// (globally unique) name. Uses the client as-is (already global-aware)
+// and returns an error if the instance doesn't exist.
+func regionOfInstance(ctx context.Context, c *lightsail.Client, name string) (string, error) {
+	instances, err := c.ListInstances(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, i := range instances {
+		if i.Name == name {
+			if i.Region == "" {
+				return "", fmt.Errorf("instance %q has no region on record", name)
+			}
+			return i.Region, nil
+		}
+	}
+	return "", fmt.Errorf("instance %q not found", name)
 }
 
 func findBucket(ctx context.Context, c *lightsail.Client, name string) *lightsail.Bucket {
@@ -153,14 +179,8 @@ func pinRegion(s *store, region string) {
 
 // needInputForCreate builds a NeedInput listing only the fields that aren't
 // already set, so the user doesn't re-answer things they already provided.
-func needInputForCreate(s *store, needRegion, needInstance, needAgent bool, app, env string) error {
+func needInputForCreate(needInstance, needAgent bool, s *store, app, env string) error {
 	var fields []registry.Field
-	if needRegion {
-		fields = append(fields, registry.Field{
-			Flag: "region", Required: true, Help: "AWS region",
-			Suggest: regionSuggest(s),
-		})
-	}
 	if needInstance {
 		fields = append(fields, registry.Field{
 			Flag: "instance", Required: true, Help: "target Lightsail instance",
@@ -170,22 +190,21 @@ func needInputForCreate(s *store, needRegion, needInstance, needAgent bool, app,
 	if needAgent {
 		fields = append(fields, registry.Field{
 			Flag: "agent-path", Required: true,
-			Help: "path to a lightsailctl binary to scp to the instance (linux/amd64)",
+			Help: "lightsailctl binary to scp to the instance (linux/amd64)",
+			File: true, // picker accepts any file when AllowedExts is empty
 		})
 	}
 	return &registry.NeedInput{
 		Fields: fields,
-		Reason: fmt.Sprintf("app %q / env %q doesn't exist yet — creating it inline", app, env),
+		Reason: fmt.Sprintf("app %q / env %q doesn't exist yet — let's create it", app, env),
 	}
 }
 
 // runCreateInline executes the create saga's side-effect steps directly.
-// Mirrors op_create.go's Steps list minus the Pin region / Verify binary
-// (pin happens here; binary check is trivial after scp actually runs).
+// Requires region to already be set in Input (derived from the picked
+// instance in ensureAppStep).
 func runCreateInline(ctx context.Context, s *store, st *registry.State) error {
-	// Pin region from the user's answer.
-	*s.region = st.Input.Get("region")
-	s.client = nil
+	pinRegion(s, st.Input.Get("region"))
 
 	for _, do := range []func(context.Context, *registry.State) error{
 		verifyAgentStep,

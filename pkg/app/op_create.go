@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/bwagner5/triad/pkg/registry"
@@ -34,11 +35,14 @@ func createOp(s *store) registry.Operation {
 		Fields: []registry.Field{
 			{Flag: "name", Short: "n", Help: "app name", Prefill: names.DefaultAppName, Required: true},
 			{Flag: "env", Short: "e", Help: "environment", Default: "dev"},
-			{Flag: "region", Help: "AWS region", Required: true, Suggest: regionSuggest(s)},
-			{Flag: "instance", Help: "target Lightsail instance", Required: true, Suggest: instanceSuggest(s)},
-			{Flag: "agent-path", Help: "path to a lightsailctl binary to scp to the instance (linux/amd64)", Required: true},
+			{Flag: "instance", Help: "target Lightsail instance (region inferred from selection)",
+				Required: true, Suggest: instanceSuggest(s)},
+			{Flag: "agent-path", Help: "lightsailctl binary to scp to the instance (linux/amd64)",
+				Required: true, File: true},
+			{Flag: "region", Help: "AWS region (auto-filled from --instance)"},
 		},
 		Steps: []registry.Step{
+			{Label: "Resolve region from instance", Do: resolveRegionStep(s)},
 			{Label: "Pin region", Do: pinRegionStep(s)},
 			{Label: "Verify agent binary exists", Do: verifyAgentStep},
 			{Label: "Create app-config bucket", Do: createAppBucketStep(s)},
@@ -56,22 +60,6 @@ func createOp(s *store) registry.Operation {
 
 // ── Suggests ──────────────────────────────────────────────────────────
 
-func regionSuggest(s *store) func(context.Context) ([]registry.Choice, error) {
-	return func(ctx context.Context) ([]registry.Choice, error) {
-		// Small curated list; FetchRegions would be nicer but requires ec2:DescribeRegions.
-		defs := []string{
-			"us-east-1", "us-east-2", "us-west-1", "us-west-2",
-			"eu-west-1", "eu-central-1", "ap-southeast-1", "ap-southeast-2",
-			"ap-northeast-1", "ap-south-1",
-		}
-		out := make([]registry.Choice, 0, len(defs))
-		for _, r := range defs {
-			out = append(out, registry.Choice{Value: r, Display: r})
-		}
-		return out, nil
-	}
-}
-
 func instanceSuggest(s *store) func(context.Context) ([]registry.Choice, error) {
 	return func(ctx context.Context) ([]registry.Choice, error) {
 		c, err := s.ensure(ctx)
@@ -82,10 +70,32 @@ func instanceSuggest(s *store) func(context.Context) ([]registry.Choice, error) 
 		if err != nil {
 			return nil, err
 		}
+		// Sort by region then name so instances cluster by region in the
+		// picker (visually reinforces that picking an instance picks a region).
+		sort.Slice(insts, func(i, j int) bool {
+			if insts[i].Region != insts[j].Region {
+				return insts[i].Region < insts[j].Region
+			}
+			return insts[i].Name < insts[j].Name
+		})
+		// Compute column widths for alignment.
+		nameW, regionW, stateW := 0, 0, 0
+		for _, i := range insts {
+			if len(i.Name) > nameW {
+				nameW = len(i.Name)
+			}
+			if len(i.Region) > regionW {
+				regionW = len(i.Region)
+			}
+			if len(i.State) > stateW {
+				stateW = len(i.State)
+			}
+		}
 		out := make([]registry.Choice, 0, len(insts))
 		for _, i := range insts {
 			out = append(out, registry.Choice{
-				Value: i.Name, Display: fmt.Sprintf("%-30s %-15s %s", i.Name, i.State, i.IP),
+				Value:   i.Name,
+				Display: fmt.Sprintf("%-*s  %-*s  %-*s  %s", regionW, i.Region, nameW, i.Name, stateW, i.State, i.IP),
 			})
 		}
 		return out, nil
@@ -93,6 +103,26 @@ func instanceSuggest(s *store) func(context.Context) ([]registry.Choice, error) 
 }
 
 // ── Steps ─────────────────────────────────────────────────────────────
+
+// resolveRegionStep fills --region from the picked instance's actual
+// region so the user never has to pick region separately.
+func resolveRegionStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		if st.Input.Get("region") != "" {
+			return nil
+		}
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		region, err := regionOfInstance(ctx, c, st.Input.Get("instance"))
+		if err != nil {
+			return err
+		}
+		st.Input["region"] = region
+		return nil
+	}
+}
 
 // pinRegionStep locks the store to --region before any regional op runs.
 func pinRegionStep(s *store) func(context.Context, *registry.State) error {
