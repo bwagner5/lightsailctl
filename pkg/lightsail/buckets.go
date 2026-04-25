@@ -45,32 +45,61 @@ func (c *Client) ListBuckets(ctx context.Context) ([]Bucket, error) {
 	return buckets, nil
 }
 
+// StreamBuckets fans out ListBuckets across regions and pushes one batch
+// per region as it completes. When the Client is pinned, emits a single
+// batch and closes. The channel is closed when all regions have reported.
+// Per-region errors are delivered as Batch{Err}; caller decides how to
+// surface them.
+func (c *Client) StreamBuckets(ctx context.Context) <-chan BucketBatch {
+	out := make(chan BucketBatch, 16)
+	if c.Region() != "" {
+		go func() {
+			defer close(out)
+			bs, err := c.ListBuckets(ctx)
+			out <- BucketBatch{Region: c.Region(), Buckets: bs, Err: err}
+		}()
+		return out
+	}
+	go func() {
+		defer close(out)
+		regions, err := c.FetchRegions(ctx)
+		if err != nil {
+			out <- BucketBatch{Err: err}
+			return
+		}
+		var wg sync.WaitGroup
+		for _, r := range regions {
+			wg.Add(1)
+			go func(region string) {
+				defer wg.Done()
+				bs, err := c.WithRegion(region).ListBuckets(ctx)
+				select {
+				case <-ctx.Done():
+				case out <- BucketBatch{Region: region, Buckets: bs, Err: err}:
+				}
+			}(r)
+		}
+		wg.Wait()
+	}()
+	return out
+}
+
+// BucketBatch is one region's contribution to a StreamBuckets call.
+type BucketBatch struct {
+	Region  string
+	Buckets []Bucket
+	Err     error
+}
+
 // listBucketsGlobal fans out ListBuckets across every AWS region.
 func (c *Client) listBucketsGlobal(ctx context.Context) ([]Bucket, error) {
-	regions, err := c.FetchRegions(ctx)
-	if err != nil {
-		return nil, err
+	var out []Bucket
+	for b := range c.StreamBuckets(ctx) {
+		if b.Err != nil {
+			continue // Lightsail not enabled here, or transient; skip.
+		}
+		out = append(out, b.Buckets...)
 	}
-	var (
-		mu  sync.Mutex
-		out []Bucket
-		wg  sync.WaitGroup
-	)
-	for _, r := range regions {
-		wg.Add(1)
-		go func(region string) {
-			defer wg.Done()
-			rc := c.WithRegion(region)
-			bs, err := rc.ListBuckets(ctx)
-			if err != nil {
-				return // Lightsail not enabled here, or transient error; skip.
-			}
-			mu.Lock()
-			out = append(out, bs...)
-			mu.Unlock()
-		}(r)
-	}
-	wg.Wait()
 	return out, nil
 }
 

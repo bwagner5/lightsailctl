@@ -70,6 +70,43 @@ func (s *store) List(ctx context.Context, _ registry.Filter) ([]any, error) {
 	return aggregate(buckets), nil
 }
 
+// StreamList fans out across regions and emits one batch per region as it
+// completes. Satisfies registry.StreamStore so the TUI renders progressively.
+func (s *store) StreamList(ctx context.Context, _ registry.Filter) <-chan registry.Batch {
+	out := make(chan registry.Batch, 16)
+	go func() {
+		defer close(out)
+		c, err := s.ensure(ctx)
+		if err != nil {
+			out <- registry.Batch{Err: err}
+			return
+		}
+		for b := range c.StreamBuckets(ctx) {
+			if b.Err != nil {
+				// Best-effort: skip regions where Lightsail isn't enabled
+				// (error would otherwise show as a toast for every such region).
+				continue
+			}
+			// Filter to app-prefixed buckets and aggregate this region's slice.
+			var appBuckets []lightsail.Bucket
+			for _, bucket := range b.Buckets {
+				if strings.HasPrefix(bucket.Name, lightsail.BucketPrefix) {
+					appBuckets = append(appBuckets, bucket)
+				}
+			}
+			if len(appBuckets) == 0 {
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case out <- registry.Batch{Items: aggregate(appBuckets)}:
+			}
+		}
+	}()
+	return out
+}
+
 // aggregate rolls a flat list of app-prefixed buckets into App rows.
 func aggregate(buckets []lightsail.Bucket) []any {
 	byName := map[string]*App{}

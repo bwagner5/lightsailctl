@@ -66,7 +66,12 @@ func main() {
 	}
 
 	runTUI := func(cmd *cobra.Command, _ []string) error {
-		return tui.Run(cmd.Context(), reg, tui.Options{Name: cliName, Version: internal.Version().String()})
+		return tui.Run(cmd.Context(), reg, tui.Options{
+			Name:      cliName,
+			Version:   internal.Version().String(),
+			Context:   app.ContextLabel(&region),
+			GlobalOps: []registry.Operation{app.RegionSwitchOp(&region)},
+		})
 	}
 	root.RunE = runTUI
 	root.AddCommand(&cobra.Command{
