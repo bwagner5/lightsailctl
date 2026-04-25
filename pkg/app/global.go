@@ -23,18 +23,10 @@ func RegionSwitchOp(region *string) registry.Operation {
 		Fields: []registry.Field{
 			{
 				Flag: "region", Required: true, Help: "AWS region (blank = global)",
-				Suggest: func(ctx context.Context) ([]registry.Choice, error) {
-					c, err := lightsail.New(ctx, "")
-					if err != nil {
-						return nil, err
-					}
-					regions, err := c.FetchRegions(ctx)
-					if err != nil {
-						return nil, err
-					}
-					regions = lightsail.SortRegionsByGroup(regions)
-					// Lead with "global"; format each region as
-					//   "<group>   <id>   <location>" with group-aligned columns.
+				Suggest: func(_ context.Context) ([]registry.Choice, error) {
+					regions := lightsail.SortRegionsByGroup(lightsail.SupportedRegions())
+					// Format each region as "<group>   <id>   <location>"
+					// with group-aligned columns.
 					maxID := len("global")
 					for _, r := range regions {
 						if len(r) > maxID {

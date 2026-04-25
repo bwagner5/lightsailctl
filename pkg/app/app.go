@@ -32,9 +32,13 @@ type App struct {
 // that is only parsed at Execute time, long after Resource() runs.
 // The empty string means "global" — list buckets/instances across every
 // AWS region.
+//
+// regionHints are plumbed through to the Lightsail client so it can
+// prioritize the fan-out order without any env-var reads below main.
 type store struct {
-	region *string
-	client *lightsail.Client
+	region      *string
+	regionHints []string
+	client      *lightsail.Client
 }
 
 func (s *store) currentRegion() string {
@@ -50,7 +54,10 @@ func (s *store) ensure(ctx context.Context) (*lightsail.Client, error) {
 	if s.client != nil && s.client.Region() == r {
 		return s.client, nil
 	}
-	c, err := lightsail.New(ctx, r)
+	c, err := lightsail.NewWithOptions(ctx, lightsail.Options{
+		Region:      r,
+		RegionHints: s.regionHints,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -178,14 +185,15 @@ func sortedCSV(csv string) string {
 
 // Resource builds the triad Resource. The region pointer is bound to a
 // persistent --region flag in main.go; "" means global (fan out across
-// all regions for list ops).
+// all regions for list ops). regionHints are env-resolved in main and
+// used to reorder fan-out — no env reads happen below main.
 //
 // Operations layer in as we port each phase: Phase 1 adds status+delete;
 // Phase 3 adds deploy; Phase 4 adds create; Phase 5 adds logs+local.
 //
 // The client is built lazily on first Store call so `--help` / `--version`
 // and offline TUI launches never touch AWS config.
-func Resource(region *string) registry.Resource {
+func Resource(region *string, regionHints []string) registry.Resource {
 	fields := []registry.Field{
 		{Name: "Name", Flag: "name", Short: "n", Help: "application name",
 			Default: names.Random(), Table: registry.TableHint{Header: "NAME"}},
@@ -198,7 +206,7 @@ func Resource(region *string) registry.Resource {
 		{Name: "Bucket", Flag: "bucket", Help: "app config bucket",
 			Table: registry.TableHint{Header: "BUCKET", Wide: true}},
 	}
-	st := &store{region: region}
+	st := &store{region: region, regionHints: regionHints}
 	suggest := registry.SuggestFrom(st, fields, "name")
 	return registry.Resource{
 		Name:    "app",

@@ -3,7 +3,6 @@ package lightsail
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,6 +17,20 @@ type Client struct {
 	cfg aws.Config
 	ls  *lightsail.Client
 	sts *sts.Client
+	// regionHints are callers' priority hints (typically AWS_REGION /
+	// AWS_DEFAULT_REGION resolved in main) used to re-order FetchRegions.
+	regionHints []string
+}
+
+// Options configures Client construction.
+type Options struct {
+	// Region pins the Client to a single AWS region. Empty = global
+	// (fan-out across SupportedRegions() for list ops).
+	Region string
+	// RegionHints are AWS regions the caller wants queried first during
+	// global fan-out (typically AWS_REGION / AWS_DEFAULT_REGION, resolved
+	// in main). Order is preserved; unknown regions are dropped.
+	RegionHints []string
 }
 
 // New loads AWS config and returns a Client. The returned Client is NOT
@@ -29,25 +42,35 @@ type Client struct {
 // If region is non-empty, the Client is pinned to that region.
 //
 // Important: AWS_REGION / AWS_DEFAULT_REGION in the environment do NOT pin
-// the Client. They serve as a priority hint for the fan-out order so the
-// user's likely-relevant region is queried first. To pin, pass --region or
-// set LIGHTSAILCTL_REGION.
+// the Client. They serve as a priority hint for the fan-out order; pass
+// them via Options.RegionHints (callers resolve env in main).
+//
+// Shim for callers that don't need to set hints. Prefer NewWithOptions.
 func New(ctx context.Context, region string) (*Client, error) {
-	opts := []func(*config.LoadOptions) error{}
-	if region != "" {
-		opts = append(opts, config.WithRegion(region))
+	return NewWithOptions(ctx, Options{Region: region})
+}
+
+// NewWithOptions is the full constructor.
+func NewWithOptions(ctx context.Context, opts Options) (*Client, error) {
+	awsOpts := []func(*config.LoadOptions) error{}
+	if opts.Region != "" {
+		awsOpts = append(awsOpts, config.WithRegion(opts.Region))
 	}
-	cfg, err := config.LoadDefaultConfig(ctx, opts...)
+	cfg, err := config.LoadDefaultConfig(ctx, awsOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
 	// Default config resolution may pick up AWS_REGION / profile default
 	// even when we didn't ask. For the unpinned path we explicitly clear
 	// that so "--region" is the only way to pin the CLI.
-	if region == "" {
+	if opts.Region == "" {
 		cfg.Region = ""
 	}
-	c := &Client{cfg: cfg, sts: sts.NewFromConfig(cfg)}
+	c := &Client{
+		cfg:         cfg,
+		sts:         sts.NewFromConfig(cfg),
+		regionHints: opts.RegionHints,
+	}
 	if cfg.Region != "" {
 		c.ls = lightsail.NewFromConfig(cfg)
 	}
@@ -63,20 +86,18 @@ func (c *Client) Region() string { return c.cfg.Region }
 func (c *Client) WithRegion(region string) *Client {
 	cfg := c.cfg.Copy()
 	cfg.Region = region
-	out := &Client{cfg: cfg, sts: sts.NewFromConfig(cfg)}
+	out := &Client{cfg: cfg, sts: sts.NewFromConfig(cfg), regionHints: c.regionHints}
 	if region != "" {
 		out.ls = lightsail.NewFromConfig(cfg)
 	}
 	return out
 }
 
-// DefaultRegion picks a sane region for first-run: env var if set, else current.
+// DefaultRegion returns a sane region for first-run. Uses the SDK's already-
+// resolved config value when available (which itself honors AWS_REGION /
+// profile defaults), else falls back to us-east-1. Env vars are NOT read
+// directly here — hermetic.
 func (c *Client) DefaultRegion() string {
-	for _, k := range []string{"AWS_REGION", "AWS_DEFAULT_REGION"} {
-		if v := os.Getenv(k); v != "" {
-			return v
-		}
-	}
 	if c.cfg.Region != "" {
 		return c.cfg.Region
 	}
@@ -145,33 +166,17 @@ func (c *Client) regional(r string) *Client {
 }
 
 // FetchRegions returns the AWS regions where Lightsail is available,
-// ordered so that regions hinted by AWS_REGION / AWS_DEFAULT_REGION come
-// first. The list is a static allowlist from the Lightsail docs (see
-// SupportedRegions); it does NOT round-trip to AWS. This matches the
-// plan's "always global across Lightsail-supported regions" UX and keeps
-// cold-start latency flat.
+// ordered so that regions in the Client's RegionHints (set from main via
+// Options.RegionHints) come first. The list is a static allowlist from
+// the Lightsail docs (see SupportedRegions); it does NOT round-trip to
+// AWS. This matches the plan's "always global across Lightsail-supported
+// regions" UX and keeps cold-start latency flat.
 //
 // --region <id> on the CLI is validated against nothing; that allows
 // customers to use a newly launched Lightsail region before we ship an
 // updated allowlist.
 func (c *Client) FetchRegions(_ context.Context) ([]string, error) {
-	return prioritizeRegions(SupportedRegions(), regionHints()), nil
-}
-
-// regionHints returns AWS_REGION and AWS_DEFAULT_REGION values (in that
-// priority), de-duplicated, skipping empties.
-func regionHints() []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, k := range []string{"AWS_REGION", "AWS_DEFAULT_REGION"} {
-		v := os.Getenv(k)
-		if v == "" || seen[v] {
-			continue
-		}
-		seen[v] = true
-		out = append(out, v)
-	}
-	return out
+	return prioritizeRegions(SupportedRegions(), c.regionHints), nil
 }
 
 // prioritizeRegions moves each region in hints (that exists in all) to the

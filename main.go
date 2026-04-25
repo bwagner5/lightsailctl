@@ -2,10 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package main is where lightsailctl command begins.
+//
+// Structure follows Mat Ryer's run-function pattern: main() only wires
+// os.* into Run(ctx, args, getenv, stdout, stderr) error. main + Run
+// are the only places in this binary that read environment variables;
+// everything else gets typed values as arguments.
 package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -27,25 +34,39 @@ func main() {
 	log.SetFlags(0)
 
 	// Preserve the AWS CLI plugin contract: when invoked with --plugin,
-	// dispatch to the existing plugin handler and exit.
+	// dispatch to the existing plugin handler and exit. This fast-path
+	// bypasses Run because the plugin protocol has its own stdio shape.
 	pluginPattern := regexp.MustCompile(`^--?plugin$`)
 	if len(os.Args) > 1 && pluginPattern.MatchString(os.Args[1]) {
 		pluginMain(os.Args[0]+" "+os.Args[1], os.Args[2:])
 		return
 	}
 
-	g := &cli.Globals{}
+	if err := Run(context.Background(), os.Args, os.Getenv, os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// Run is the testable program entry point. This is the ONLY function in
+// lightsailctl (outside of triad's internal flag-default resolution) that
+// reads env vars — every other layer receives typed values.
+func Run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) error {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
+	defer stop()
+
+	// Resolve all environment input here.
+	region := getenv(cli.FlagToEnvVar(cliName, "region"))
+	regionHints := dedupeNonEmpty(getenv("AWS_REGION"), getenv("AWS_DEFAULT_REGION"))
+
+	g := &cli.Globals{Getenv: getenv}
 	reg := registry.New()
-	// region is a persistent --region flag bound to a pointer the Resource
-	// store closes over. "" means global (fan out across regions for lists).
-	//
-	// Precedence: --region > LIGHTSAILCTL_REGION > "" (global).
-	// AWS_REGION / AWS_DEFAULT_REGION intentionally do NOT pin the CLI;
-	// they're only used to re-order the global fan-out so the likely-
-	// relevant region is queried first (see pkg/lightsail).
-	region := os.Getenv(cli.FlagToEnvVar(cliName, "region"))
-	reg.Register(app.Resource(&region))
+	reg.Register(app.Resource(&region, regionHints))
+
 	root := cli.Build(cliName, "Amazon Lightsail CLI", reg, g)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetArgs(args[1:])
 	root.Version = internal.Version().String()
 
 	root.PersistentFlags().StringVar(&region, "region", region,
@@ -81,11 +102,22 @@ func main() {
 		RunE:    runTUI,
 	})
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	if err := root.ExecuteContext(ctx); err != nil {
-		os.Exit(1)
+	return root.ExecuteContext(ctx)
+}
+
+// dedupeNonEmpty returns a deduplicated slice of the non-empty inputs,
+// preserving first-seen order.
+func dedupeNonEmpty(vals ...string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, v := range vals {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
 	}
+	return out
 }
 
 // May be set by tests to something else.
