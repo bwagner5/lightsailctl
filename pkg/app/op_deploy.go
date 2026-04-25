@@ -28,11 +28,10 @@ func deployOp(s *store) registry.Operation {
 	return registry.Operation{
 		Name: "deploy", Key: "d", Short: "deploy current dir to an app/env",
 		Fields: []registry.Field{
-			// Default to git-repo-or-random rather than a Suggest picker:
-			// fresh `deploy` runs auto-create when the app is missing, so
-			// forcing the user to "pick from existing apps" is wrong for
-			// the bootstrap path.
-			{Flag: "name", Short: "n", Help: "app name", Required: true, Default: names.DefaultAppName()},
+			// Prefill (not Default) so the wizard opens with the git
+			// repo name / space-themed random pre-filled — user hits
+			// Enter to accept, or types to override.
+			{Flag: "name", Short: "n", Help: "app name", Required: true, Prefill: names.DefaultAppName},
 			{Flag: "env", Short: "e", Help: "environment", Default: "dev"},
 			{Flag: "region", Help: "AWS region"},
 			{Flag: "wait-timeout", Help: "how long to wait for healthy (0 with --no-wait)", Default: "3m"},

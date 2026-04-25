@@ -11,7 +11,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -43,7 +42,8 @@ func main() {
 	}
 
 	if err := Run(context.Background(), os.Args, os.Getenv, os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		// The saga/CLI renderer already printed the human-facing error.
+		// Just exit non-zero so CI sees a failure.
 		os.Exit(1)
 	}
 }

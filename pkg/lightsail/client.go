@@ -104,9 +104,19 @@ func (c *Client) DefaultRegion() string {
 	return "us-east-1"
 }
 
-// AccountID returns the AWS account ID of the caller.
+// AccountID returns the AWS account ID of the caller. Works whether the
+// Client is pinned to a region or in global mode: STS is a regional
+// service but us-east-1 is always reachable in the aws partition (where
+// Lightsail lives), so we use it as a safe default when unpinned.
 func (c *Client) AccountID(ctx context.Context) (string, error) {
-	out, err := c.sts.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	stsSvc := c.sts
+	if c.cfg.Region == "" {
+		// Global mode — build a one-off STS client pointed at us-east-1.
+		cfg := c.cfg.Copy()
+		cfg.Region = "us-east-1"
+		stsSvc = sts.NewFromConfig(cfg)
+	}
+	out, err := stsSvc.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {
 		return "", fmt.Errorf("get caller identity: %w", err)
 	}
