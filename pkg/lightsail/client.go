@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/lightsail"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
@@ -146,30 +144,18 @@ func (c *Client) regional(r string) *Client {
 	return c.WithRegion(r)
 }
 
-// FetchRegions returns every AWS region visible to the caller, ordered so
-// that regions hinted by AWS_REGION / AWS_DEFAULT_REGION come first. Uses
-// ec2:DescribeRegions since Lightsail has no region-list API.
+// FetchRegions returns the AWS regions where Lightsail is available,
+// ordered so that regions hinted by AWS_REGION / AWS_DEFAULT_REGION come
+// first. The list is a static allowlist from the Lightsail docs (see
+// SupportedRegions); it does NOT round-trip to AWS. This matches the
+// plan's "always global across Lightsail-supported regions" UX and keeps
+// cold-start latency flat.
 //
-// The hint is used ONLY to prioritize ordering; it does not pin the Client
-// or filter the results. Callers that truly want a single region should
-// pass --region.
-func (c *Client) FetchRegions(ctx context.Context) ([]string, error) {
-	// EC2 DescribeRegions needs a region; us-east-1 is safe universally.
-	cfg := c.cfg.Copy()
-	if cfg.Region == "" {
-		cfg.Region = "us-east-1"
-	}
-	svc := ec2.NewFromConfig(cfg)
-	out, err := svc.DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	for _, r := range out.Regions {
-		names = append(names, aws.ToString(r.RegionName))
-	}
-	sort.Strings(names)
-	return prioritizeRegions(names, regionHints()), nil
+// --region <id> on the CLI is validated against nothing; that allows
+// customers to use a newly launched Lightsail region before we ship an
+// updated allowlist.
+func (c *Client) FetchRegions(_ context.Context) ([]string, error) {
+	return prioritizeRegions(SupportedRegions(), regionHints()), nil
 }
 
 // regionHints returns AWS_REGION and AWS_DEFAULT_REGION values (in that

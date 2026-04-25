@@ -5,57 +5,60 @@ import (
 	"strings"
 )
 
-// regionLocations maps AWS region IDs to human-readable locations. Used for
-// friendlier region pickers in the TUI.
+// SupportedRegions is the canonical list of AWS regions where Amazon
+// Lightsail is available.
 //
-// Sourced from AWS docs; updated as new regions launch. Unknown regions
-// fall through to "" (only the ID is shown).
+// Source: https://docs.aws.amazon.com/lightsail/latest/userguide/understanding-regions-and-availability-zones-in-amazon-lightsail.html
+//
+// Used as the candidate set for global fan-out (ListBuckets, ListInstances)
+// and for the interactive region picker. --region <id> is NOT validated
+// against this list so customers can start using a newly-launched region
+// before we ship an update.
+//
+// Regions marked "opt-in" require the user to enable them in their AWS
+// account (ap-southeast-3 Jakarta, ap-southeast-5 Malaysia). Our fan-out
+// tolerates per-region errors, so calls there are no-ops for accounts
+// that haven't enabled them.
+func SupportedRegions() []string {
+	return []string{
+		"us-east-1",      // N. Virginia
+		"us-east-2",      // Ohio
+		"us-west-2",      // Oregon
+		"ap-south-1",     // Mumbai
+		"ap-northeast-1", // Tokyo
+		"ap-northeast-2", // Seoul
+		"ap-southeast-1", // Singapore
+		"ap-southeast-2", // Sydney
+		"ap-southeast-3", // Jakarta (opt-in)
+		"ap-southeast-5", // Malaysia (opt-in)
+		"ca-central-1",   // Canada (Central)
+		"eu-central-1",   // Frankfurt
+		"eu-west-1",      // Ireland
+		"eu-west-2",      // London
+		"eu-west-3",      // Paris
+		"eu-north-1",     // Stockholm
+	}
+}
+
+// regionLocations maps each Lightsail-supported region to its human-readable
+// location. Unknown regions fall through to "" (only the ID is shown).
 var regionLocations = map[string]string{
-	// Americas
-	"us-east-1":     "N. Virginia",
-	"us-east-2":     "Ohio",
-	"us-west-1":     "N. California",
-	"us-west-2":     "Oregon",
-	"us-gov-east-1": "US Gov East",
-	"us-gov-west-1": "US Gov West",
-	"ca-central-1":  "Central Canada",
-	"ca-west-1":     "Calgary",
-	"sa-east-1":     "São Paulo",
-	"mx-central-1":  "Mexico",
-
-	// Europe
-	"eu-west-1":    "Ireland",
-	"eu-west-2":    "London",
-	"eu-west-3":    "Paris",
-	"eu-central-1": "Frankfurt",
-	"eu-central-2": "Zurich",
-	"eu-north-1":   "Stockholm",
-	"eu-south-1":   "Milan",
-	"eu-south-2":   "Spain",
-
-	// Asia Pacific
-	"ap-east-1":      "Hong Kong",
+	"us-east-1":      "N. Virginia",
+	"us-east-2":      "Ohio",
+	"us-west-2":      "Oregon",
 	"ap-south-1":     "Mumbai",
-	"ap-south-2":     "Hyderabad",
+	"ap-northeast-1": "Tokyo",
+	"ap-northeast-2": "Seoul",
 	"ap-southeast-1": "Singapore",
 	"ap-southeast-2": "Sydney",
 	"ap-southeast-3": "Jakarta",
-	"ap-southeast-4": "Melbourne",
 	"ap-southeast-5": "Malaysia",
-	"ap-southeast-7": "Thailand",
-	"ap-northeast-1": "Tokyo",
-	"ap-northeast-2": "Seoul",
-	"ap-northeast-3": "Osaka",
-
-	// Middle East + Africa
-	"me-south-1":   "Bahrain",
-	"me-central-1": "UAE",
-	"il-central-1": "Tel Aviv",
-	"af-south-1":   "Cape Town",
-
-	// China
-	"cn-north-1":     "Beijing",
-	"cn-northwest-1": "Ningxia",
+	"ca-central-1":   "Central Canada",
+	"eu-central-1":   "Frankfurt",
+	"eu-west-1":      "Ireland",
+	"eu-west-2":      "London",
+	"eu-west-3":      "Paris",
+	"eu-north-1":     "Stockholm",
 }
 
 // groupLabels maps the region prefix (first dash-separated segment) to a
@@ -63,14 +66,8 @@ var regionLocations = map[string]string{
 var groupLabels = map[string]string{
 	"us": "US",
 	"ca": "Canada",
-	"sa": "South America",
-	"mx": "Mexico",
 	"eu": "Europe",
 	"ap": "Asia Pacific",
-	"me": "Middle East",
-	"af": "Africa",
-	"il": "Israel",
-	"cn": "China",
 }
 
 // RegionLocation returns the human-readable location for a region, or ""

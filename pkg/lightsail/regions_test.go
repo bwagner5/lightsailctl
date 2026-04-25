@@ -14,9 +14,8 @@ func TestRegionGroupAndLocation(t *testing.T) {
 		{"us-east-1", "US", "Virginia"},
 		{"eu-west-2", "Europe", "London"},
 		{"ap-northeast-1", "Asia Pacific", "Tokyo"},
-		{"sa-east-1", "South America", "Paulo"},
-		{"af-south-1", "Africa", "Cape Town"},
-		{"xx-foo-1", "XX", ""}, // unknown, falls through to prefix
+		{"ca-central-1", "Canada", "Canada"},
+		{"xx-foo-1", "XX", ""}, // unknown region: graceful fallback
 	}
 	for _, c := range cases {
 		if got := RegionGroup(c.region); got != c.wantGroup {
@@ -28,6 +27,20 @@ func TestRegionGroupAndLocation(t *testing.T) {
 		}
 		if c.wantLocSub != "" && !strings.Contains(loc, c.wantLocSub) {
 			t.Errorf("RegionLocation(%q) = %q; want substring %q", c.region, loc, c.wantLocSub)
+		}
+	}
+}
+
+// TestSupportedRegionsCoverage guarantees every region in the allowlist has
+// a friendly location and a group label — so the picker never renders a
+// blank cell for a supported region.
+func TestSupportedRegionsCoverage(t *testing.T) {
+	for _, r := range SupportedRegions() {
+		if RegionLocation(r) == "" {
+			t.Errorf("%s: missing location entry in regionLocations", r)
+		}
+		if _, ok := groupLabels[regionPrefix(r)]; !ok {
+			t.Errorf("%s: prefix %q missing from groupLabels", r, regionPrefix(r))
 		}
 	}
 }
