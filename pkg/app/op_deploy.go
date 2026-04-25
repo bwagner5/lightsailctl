@@ -79,17 +79,20 @@ func resolveStep(s *store) func(context.Context, *registry.State) error {
 		if st.Input.Get("name") == "" {
 			return errors.New("no app configured (set --name or create ./lightsail.conf)")
 		}
-		if st.Input.Get("region") != "" {
-			// Re-bind the client to the requested region so subsequent steps
+		if st.Input.Get("region") != "" && s.region != nil {
+			// Pin the store to the flag-supplied region so subsequent steps
 			// hit the right Lightsail endpoint.
-			s.region = st.Input.Get("region")
+			*s.region = st.Input.Get("region")
 			s.client = nil
 		}
 		return nil
 	}
 }
 
-// verifyAppStep: the env bucket must exist or we can't deploy.
+// verifyAppStep: the env bucket must exist or we can't deploy. When the
+// store is running global (no --region), we find the bucket across regions
+// and pin the store to its region so all subsequent saga steps hit the
+// right Lightsail endpoint.
 func verifyAppStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		c, err := s.ensure(ctx)
@@ -109,6 +112,11 @@ func verifyAppStep(s *store) func(context.Context, *registry.State) error {
 		for _, b := range buckets {
 			if b.Name == envBucket {
 				st.Data["bucket"] = envBucket
+				// Pin the store to the bucket's region for subsequent steps.
+				if s.region != nil && b.Region != "" && *s.region != b.Region {
+					*s.region = b.Region
+					s.client = nil
+				}
 				return nil
 			}
 		}

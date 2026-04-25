@@ -36,9 +36,15 @@ func main() {
 
 	g := &cli.Globals{}
 	reg := registry.New()
-	reg.Register(app.Resource(os.Getenv("AWS_REGION")))
+	// region is a persistent --region flag bound to a pointer the Resource
+	// store closes over. "" means global (fan out across regions for lists).
+	region := os.Getenv("AWS_REGION")
+	reg.Register(app.Resource(&region))
 	root := cli.Build(cliName, "Amazon Lightsail CLI", reg, g)
 	root.Version = internal.Version().String()
+
+	root.PersistentFlags().StringVar(&region, "region", region,
+		"AWS region (blank = show/list across all regions)")
 
 	// Top-level `lightsailctl deploy` runs `app deploy`.
 	root.AddCommand(cli.AliasOp(reg, g, "app", "deploy", "deploy",

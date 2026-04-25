@@ -47,7 +47,7 @@ func deleteOp(s *store, suggest func(context.Context) ([]registry.Choice, error)
 					}
 					seen[r.Instance] = struct{}{}
 					// best-effort; a still-tagged instance is skipped inside ResetFirewallIfUnused
-					_ = c.ResetFirewallIfUnused(ctx, r.Instance)
+					_ = c.ResetFirewallIfUnused(ctx, r.Instance, r.Region)
 				}
 				return nil
 			}},
@@ -73,13 +73,13 @@ func deleteAppBuckets(ctx context.Context, c *lightsail.Client, appName string) 
 	var firstErr error
 	for _, b := range buckets {
 		if a, _ := lightsail.ParseAppEnv(b.Name); a == appName {
-			if err := c.DeleteBucket(ctx, b.Name); err != nil && firstErr == nil {
+			if err := c.DeleteBucket(ctx, b.Name, b.Region); err != nil && firstErr == nil {
 				firstErr = fmt.Errorf("delete %s: %w", b.Name, err)
 			}
 			continue
 		}
 		if lightsail.ParseAppFromAppBucket(b.Name) == appName {
-			if err := c.DeleteBucket(ctx, b.Name); err != nil && firstErr == nil {
+			if err := c.DeleteBucket(ctx, b.Name, b.Region); err != nil && firstErr == nil {
 				firstErr = fmt.Errorf("delete %s: %w", b.Name, err)
 			}
 		}

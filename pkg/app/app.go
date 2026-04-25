@@ -27,16 +27,30 @@ type App struct {
 
 // store adapts lightsail.Client into a registry.Store. The client is built
 // lazily on first call so `--help` / `--version` never touch AWS config.
+//
+// region is a pointer so main.go can bind it to a persistent --region flag
+// that is only parsed at Execute time, long after Resource() runs.
+// The empty string means "global" — list buckets/instances across every
+// AWS region.
 type store struct {
-	region string
+	region *string
 	client *lightsail.Client
 }
 
+func (s *store) currentRegion() string {
+	if s.region == nil {
+		return ""
+	}
+	return *s.region
+}
+
 func (s *store) ensure(ctx context.Context) (*lightsail.Client, error) {
-	if s.client != nil {
+	r := s.currentRegion()
+	// Re-build if the requested region changed since last call.
+	if s.client != nil && s.client.Region() == r {
 		return s.client, nil
 	}
-	c, err := lightsail.New(ctx, s.region)
+	c, err := lightsail.New(ctx, r)
 	if err != nil {
 		return nil, err
 	}
@@ -125,19 +139,22 @@ func sortedCSV(csv string) string {
 	return strings.Join(parts, ",")
 }
 
-// Resource builds the triad Resource. Operations layer in as we port each
-// phase: Phase 1 adds status+delete; Phase 3 adds deploy; Phase 4 adds
-// create; Phase 5 adds logs+local.
+// Resource builds the triad Resource. The region pointer is bound to a
+// persistent --region flag in main.go; "" means global (fan out across
+// all regions for list ops).
+//
+// Operations layer in as we port each phase: Phase 1 adds status+delete;
+// Phase 3 adds deploy; Phase 4 adds create; Phase 5 adds logs+local.
 //
 // The client is built lazily on first Store call so `--help` / `--version`
 // and offline TUI launches never touch AWS config.
-func Resource(region string) registry.Resource {
+func Resource(region *string) registry.Resource {
 	fields := []registry.Field{
 		{Name: "Name", Flag: "name", Short: "n", Help: "application name",
 			Default: names.Random(), Table: registry.TableHint{Header: "NAME"}},
 		{Name: "Envs", Flag: "envs", Help: "environments",
 			Table: registry.TableHint{Header: "ENVS"}},
-		{Name: "Region", Flag: "region", Help: "AWS region",
+		{Name: "Region", Flag: "region-field", Help: "AWS region",
 			Table: registry.TableHint{Header: "REGION"}},
 		{Name: "State", Flag: "state", Help: "bucket state",
 			Table: registry.TableHint{Header: "STATE"}},

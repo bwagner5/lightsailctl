@@ -3,6 +3,7 @@ package lightsail
 import (
 	"context"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/lightsail"
@@ -15,10 +16,17 @@ type Bucket struct {
 	Region string
 }
 
-// ListBuckets returns every Lightsail bucket visible to the caller in the
-// client's configured region. No filtering is applied — callers that only
-// want application buckets filter on BucketPrefix.
+// ListBuckets returns every Lightsail bucket visible to the caller.
+//
+// When the Client is pinned to a region (WithRegion or --region), lists
+// that region only. When unpinned (the default TUI/list path), fans out
+// across every region and returns the union. Lightsail is not enabled in
+// every region; per-region errors are silently skipped so one dead region
+// doesn't kill the global list.
 func (c *Client) ListBuckets(ctx context.Context) ([]Bucket, error) {
+	if c.Region() == "" {
+		return c.listBucketsGlobal(ctx)
+	}
 	out, err := c.ls.GetBuckets(ctx, &lightsail.GetBucketsInput{})
 	if err != nil {
 		return nil, err
@@ -35,6 +43,35 @@ func (c *Client) ListBuckets(ctx context.Context) ([]Bucket, error) {
 		buckets = append(buckets, bkt)
 	}
 	return buckets, nil
+}
+
+// listBucketsGlobal fans out ListBuckets across every AWS region.
+func (c *Client) listBucketsGlobal(ctx context.Context) ([]Bucket, error) {
+	regions, err := c.FetchRegions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		mu  sync.Mutex
+		out []Bucket
+		wg  sync.WaitGroup
+	)
+	for _, r := range regions {
+		wg.Add(1)
+		go func(region string) {
+			defer wg.Done()
+			rc := c.WithRegion(region)
+			bs, err := rc.ListBuckets(ctx)
+			if err != nil {
+				return // Lightsail not enabled here, or transient error; skip.
+			}
+			mu.Lock()
+			out = append(out, bs...)
+			mu.Unlock()
+		}(r)
+	}
+	wg.Wait()
+	return out, nil
 }
 
 // ListAppBuckets returns only the buckets that match our naming scheme

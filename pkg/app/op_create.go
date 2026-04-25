@@ -39,6 +39,7 @@ func createOp(s *store) registry.Operation {
 			{Flag: "agent-path", Help: "path to a lightsailctl binary to scp to the instance (linux/amd64)", Required: true},
 		},
 		Steps: []registry.Step{
+			{Label: "Pin region", Do: pinRegionStep(s)},
 			{Label: "Verify agent binary exists", Do: verifyAgentStep},
 			{Label: "Create app-config bucket", Do: createAppBucketStep(s)},
 			{Label: "Create env bucket", Do: createEnvBucketStep(s)},
@@ -92,6 +93,21 @@ func instanceSuggest(s *store) func(context.Context) ([]registry.Choice, error) 
 }
 
 // ── Steps ─────────────────────────────────────────────────────────────
+
+// pinRegionStep locks the store to --region before any regional op runs.
+func pinRegionStep(s *store) func(context.Context, *registry.State) error {
+	return func(_ context.Context, st *registry.State) error {
+		r := st.Input.Get("region")
+		if r == "" {
+			return fmt.Errorf("region is required")
+		}
+		if s.region != nil && *s.region != r {
+			*s.region = r
+			s.client = nil
+		}
+		return nil
+	}
+}
 
 func verifyAgentStep(_ context.Context, st *registry.State) error {
 	p := st.Input.Get("agent-path")

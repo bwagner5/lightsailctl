@@ -33,11 +33,17 @@ func statusOp(s *store, suggest func(context.Context) ([]registry.Choice, error)
 			if err != nil {
 				return err
 			}
-			envs, err := resolveEnvs(ctx, c, acct, in.Get("name"), in.Get("env"))
+			app := in.Get("name")
+			// Resolve env->region map from buckets (works globally).
+			buckets, err := c.ListAppBuckets(ctx)
 			if err != nil {
 				return err
 			}
-			report := buildReport(ctx, c, acct, in.Get("name"), envs)
+			envs := envBucketsForApp(app, buckets, in.Get("env"))
+			if len(envs) == 0 {
+				return fmt.Errorf("no environments found for app %q", app)
+			}
+			report := buildReport(ctx, c, acct, app, envs)
 			format := in.Get("format")
 			if format == "" {
 				format = "short"
@@ -47,27 +53,24 @@ func statusOp(s *store, suggest func(context.Context) ([]registry.Choice, error)
 	}
 }
 
-// resolveEnvs returns the envs we should report on. If user supplied --env,
-// use that; otherwise list all env buckets for the app.
-func resolveEnvs(ctx context.Context, c *lightsail.Client, acct, app, env string) ([]string, error) {
-	if env != "" {
-		return []string{env}, nil
-	}
-	buckets, err := c.ListAppBuckets(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var envs []string
+// envInfo holds an env's bucket name and region.
+type envInfo struct{ Env, Bucket, Region string }
+
+// envBucketsForApp filters app's env buckets down to filter (or all when "").
+func envBucketsForApp(app string, buckets []lightsail.Bucket, filter string) []envInfo {
+	var out []envInfo
 	for _, b := range buckets {
-		if a, e := lightsail.ParseAppEnv(b.Name); a == app && e != "" {
-			envs = append(envs, e)
+		a, e := lightsail.ParseAppEnv(b.Name)
+		if a != app || e == "" {
+			continue
 		}
+		if filter != "" && e != filter {
+			continue
+		}
+		out = append(out, envInfo{Env: e, Bucket: b.Name, Region: b.Region})
 	}
-	sort.Strings(envs)
-	if len(envs) == 0 {
-		return nil, fmt.Errorf("no environments found for app %q", app)
-	}
-	return envs, nil
+	sort.Slice(out, func(i, j int) bool { return out[i].Env < out[j].Env })
+	return out
 }
 
 // Report is the status shape. The raw status file is JSON; we give users
@@ -84,12 +87,15 @@ type EnvReport struct {
 	Error    string             `json:"error,omitempty"`
 }
 
-func buildReport(ctx context.Context, c *lightsail.Client, acct, app string, envs []string) Report {
+func buildReport(ctx context.Context, c *lightsail.Client, acct, app string, envs []envInfo) Report {
 	rep := Report{App: app}
-	for _, env := range envs {
-		bucket := lightsail.EnvBucketName(acct, app, env)
-		er := EnvReport{Env: env, Bucket: bucket}
-		st, err := c.ReadBucketStatuses(ctx, bucket)
+	for _, ei := range envs {
+		er := EnvReport{Env: ei.Env, Bucket: ei.Bucket}
+		rc := c
+		if ei.Region != "" {
+			rc = c.WithRegion(ei.Region)
+		}
+		st, err := rc.ReadBucketStatuses(ctx, ei.Bucket)
 		if err != nil {
 			er.Error = err.Error()
 		} else {

@@ -2,6 +2,7 @@ package lightsail
 
 import (
 	"context"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/lightsail"
@@ -18,8 +19,13 @@ type Instance struct {
 	raw    *lstypes.Instance
 }
 
-// ListInstances returns every Lightsail instance in the client's region.
+// ListInstances returns every Lightsail instance visible to the caller.
+// When the Client is unpinned, fans out across all regions (same model as
+// ListBuckets).
 func (c *Client) ListInstances(ctx context.Context) ([]Instance, error) {
+	if c.Region() == "" {
+		return c.listInstancesGlobal(ctx)
+	}
 	var out []Instance
 	var page *string
 	for {
@@ -35,6 +41,34 @@ func (c *Client) ListInstances(ctx context.Context) ([]Instance, error) {
 		}
 		page = resp.NextPageToken
 	}
+}
+
+func (c *Client) listInstancesGlobal(ctx context.Context) ([]Instance, error) {
+	regions, err := c.FetchRegions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		mu  sync.Mutex
+		out []Instance
+		wg  sync.WaitGroup
+	)
+	for _, r := range regions {
+		wg.Add(1)
+		go func(region string) {
+			defer wg.Done()
+			rc := c.WithRegion(region)
+			is, err := rc.ListInstances(ctx)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			out = append(out, is...)
+			mu.Unlock()
+		}(r)
+	}
+	wg.Wait()
+	return out, nil
 }
 
 // GetInstance fetches a single instance by name.
