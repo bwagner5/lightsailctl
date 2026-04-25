@@ -32,10 +32,31 @@ func RegionSwitchOp(region *string) registry.Operation {
 					if err != nil {
 						return nil, err
 					}
-					// Lead with "global" so it's pickable from the list.
-					out := []registry.Choice{{Value: "global", Display: "global (all regions)"}}
+					regions = lightsail.SortRegionsByGroup(regions)
+					// Lead with "global"; format each region as
+					//   "<group>   <id>   <location>" with group-aligned columns.
+					maxID := len("global")
 					for _, r := range regions {
-						out = append(out, registry.Choice{Value: r, Display: r})
+						if len(r) > maxID {
+							maxID = len(r)
+						}
+					}
+					maxGroup := 0
+					for _, r := range regions {
+						if g := lightsail.RegionGroup(r); len(g) > maxGroup {
+							maxGroup = len(g)
+						}
+					}
+					out := []registry.Choice{{
+						Value:   "global",
+						Display: fmt.Sprintf("%-*s  %-*s  %s", maxGroup, "—", maxID, "global", "all regions"),
+					}}
+					for _, r := range regions {
+						loc := lightsail.RegionLocation(r)
+						out = append(out, registry.Choice{
+							Value:   r,
+							Display: fmt.Sprintf("%-*s  %-*s  %s", maxGroup, lightsail.RegionGroup(r), maxID, r, loc),
+						})
 					}
 					return out, nil
 				},
