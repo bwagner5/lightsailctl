@@ -196,7 +196,7 @@ func sortedCSV(csv string) string {
 func Resource(region *string, regionHints []string) registry.Resource {
 	fields := []registry.Field{
 		{Name: "Name", Flag: "name", Short: "n", Help: "application name",
-			Default: names.Random(), Table: registry.TableHint{Header: "NAME"}},
+			Default: names.DefaultAppName(), Table: registry.TableHint{Header: "NAME"}},
 		{Name: "Envs", Flag: "envs", Help: "environments",
 			Table: registry.TableHint{Header: "ENVS"}},
 		{Name: "Region", Flag: "region-field", Help: "AWS region",
@@ -219,7 +219,7 @@ func Resource(region *string, regionHints []string) registry.Resource {
 			"create": createOp(st),
 			"status": statusOp(st, suggest),
 			"delete": deleteOp(st, suggest),
-			"deploy": deployOp(st, suggest),
+			"deploy": deployOp(st),
 			"logs":   logsOp(st, suggest),
 		},
 	}

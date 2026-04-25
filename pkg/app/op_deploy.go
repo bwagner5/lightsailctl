@@ -15,6 +15,7 @@ import (
 	"github.com/aws/lightsailctl/pkg/config"
 	"github.com/aws/lightsailctl/pkg/deploy"
 	"github.com/aws/lightsailctl/pkg/lightsail"
+	"github.com/aws/lightsailctl/pkg/names"
 )
 
 // deployOp implements `lightsailctl app deploy` / `lightsailctl deploy`.
@@ -23,12 +24,16 @@ import (
 // The target Application MUST already exist (buckets + tagged instance +
 // installed watcher). Phase 4 adds auto-create; Phase 3 emits a clear error
 // telling the user to run `lightsailctl app create` first.
-func deployOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
+func deployOp(s *store) registry.Operation {
 	return registry.Operation{
 		Name: "deploy", Key: "d", Short: "deploy current dir to an app/env",
 		Fields: []registry.Field{
-			{Flag: "name", Short: "n", Help: "app name", Required: true, Suggest: suggest},
-			{Flag: "env", Short: "e", Help: "environment"},
+			// Default to git-repo-or-random rather than a Suggest picker:
+			// fresh `deploy` runs auto-create when the app is missing, so
+			// forcing the user to "pick from existing apps" is wrong for
+			// the bootstrap path.
+			{Flag: "name", Short: "n", Help: "app name", Required: true, Default: names.DefaultAppName()},
+			{Flag: "env", Short: "e", Help: "environment", Default: "dev"},
 			{Flag: "region", Help: "AWS region"},
 			{Flag: "wait-timeout", Help: "how long to wait for healthy (0 with --no-wait)", Default: "3m"},
 			{Flag: "no-wait", Help: "upload and exit without waiting for health", Default: "false"},
