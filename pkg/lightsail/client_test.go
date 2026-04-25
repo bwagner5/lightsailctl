@@ -48,3 +48,31 @@ func TestBucketNames(t *testing.T) {
 		t.Errorf("EnvBucketName: %q", got)
 	}
 }
+
+func TestPrioritizeRegions(t *testing.T) {
+	all := []string{"ap-south-1", "eu-west-1", "us-east-1", "us-east-2"}
+	cases := []struct {
+		name  string
+		hints []string
+		want  []string
+	}{
+		{"no hints", nil, []string{"ap-south-1", "eu-west-1", "us-east-1", "us-east-2"}},
+		{"single hint", []string{"us-east-2"}, []string{"us-east-2", "ap-south-1", "eu-west-1", "us-east-1"}},
+		{"two hints preserve order", []string{"eu-west-1", "us-east-1"},
+			[]string{"eu-west-1", "us-east-1", "ap-south-1", "us-east-2"}},
+		{"unknown hint dropped", []string{"fake-1", "us-east-2"}, []string{"us-east-2", "ap-south-1", "eu-west-1", "us-east-1"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := prioritizeRegions(all, c.hints)
+			if len(got) != len(c.want) {
+				t.Fatalf("len=%d want=%d: %v", len(got), len(c.want), got)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("got %v; want %v", got, c.want)
+				}
+			}
+		})
+	}
+}

@@ -28,8 +28,12 @@ type Client struct {
 // (the API itself is regional, but our CLI surfaces "show me every app
 // across every region" by default).
 //
-// If region is non-empty, the Client is pinned to that region (used by
-// `--region` override and by create/deploy sagas once resolved).
+// If region is non-empty, the Client is pinned to that region.
+//
+// Important: AWS_REGION / AWS_DEFAULT_REGION in the environment do NOT pin
+// the Client. They serve as a priority hint for the fan-out order so the
+// user's likely-relevant region is queried first. To pin, pass --region or
+// set LIGHTSAILCTL_REGION.
 func New(ctx context.Context, region string) (*Client, error) {
 	opts := []func(*config.LoadOptions) error{}
 	if region != "" {
@@ -39,10 +43,12 @@ func New(ctx context.Context, region string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
-	// SDK config resolution may leave Region empty if the user has no
-	// profile default. That's fine for the global listing path; ops that
-	// need a region will call WithRegion() explicitly and will error loudly
-	// if the caller passes "".
+	// Default config resolution may pick up AWS_REGION / profile default
+	// even when we didn't ask. For the unpinned path we explicitly clear
+	// that so "--region" is the only way to pin the CLI.
+	if region == "" {
+		cfg.Region = ""
+	}
 	c := &Client{cfg: cfg, sts: sts.NewFromConfig(cfg)}
 	if cfg.Region != "" {
 		c.ls = lightsail.NewFromConfig(cfg)
@@ -140,9 +146,13 @@ func (c *Client) regional(r string) *Client {
 	return c.WithRegion(r)
 }
 
-// FetchRegions returns every AWS region visible to the caller. Uses ec2:
-// DescribeRegions since Lightsail has no region-list API. Sorted with
-// preferred (AWS_REGION env or profile default) first.
+// FetchRegions returns every AWS region visible to the caller, ordered so
+// that regions hinted by AWS_REGION / AWS_DEFAULT_REGION come first. Uses
+// ec2:DescribeRegions since Lightsail has no region-list API.
+//
+// The hint is used ONLY to prioritize ordering; it does not pin the Client
+// or filter the results. Callers that truly want a single region should
+// pass --region.
 func (c *Client) FetchRegions(ctx context.Context) ([]string, error) {
 	// EC2 DescribeRegions needs a region; us-east-1 is safe universally.
 	cfg := c.cfg.Copy()
@@ -158,17 +168,54 @@ func (c *Client) FetchRegions(ctx context.Context) ([]string, error) {
 	for _, r := range out.Regions {
 		names = append(names, aws.ToString(r.RegionName))
 	}
-	preferred := c.DefaultRegion()
-	sort.SliceStable(names, func(i, j int) bool {
-		if names[i] == preferred {
-			return true
+	sort.Strings(names)
+	return prioritizeRegions(names, regionHints()), nil
+}
+
+// regionHints returns AWS_REGION and AWS_DEFAULT_REGION values (in that
+// priority), de-duplicated, skipping empties.
+func regionHints() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, k := range []string{"AWS_REGION", "AWS_DEFAULT_REGION"} {
+		v := os.Getenv(k)
+		if v == "" || seen[v] {
+			continue
 		}
-		if names[j] == preferred {
-			return false
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
+
+// prioritizeRegions moves each region in hints (that exists in all) to the
+// front, preserving the order of hints. Others follow in all's original order.
+func prioritizeRegions(all, hints []string) []string {
+	if len(hints) == 0 {
+		return all
+	}
+	inHints := map[string]bool{}
+	for _, h := range hints {
+		inHints[h] = true
+	}
+	out := make([]string, 0, len(all))
+	// Hints first (only those that actually appear in all).
+	present := map[string]bool{}
+	for _, r := range all {
+		present[r] = true
+	}
+	for _, h := range hints {
+		if present[h] {
+			out = append(out, h)
 		}
-		return names[i] < names[j]
-	})
-	return names, nil
+	}
+	// Then everything else, original order.
+	for _, r := range all {
+		if !inHints[r] {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // fanOut runs fn concurrently across each region and collects results.
