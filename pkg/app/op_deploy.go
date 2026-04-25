@@ -212,7 +212,6 @@ func runCreateInline(ctx context.Context, s *store, st *registry.State) error {
 		createEnvBucketStep(s),
 		tagInstanceStep(s),
 		grantAccessStep(s),
-		sleepStep(30 * time.Second),
 		scpAgentStep(s),
 		remoteInstallStep(s),
 		remoteUpStep(s),

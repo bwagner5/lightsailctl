@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"time"
 
 	"github.com/bwagner5/triad/pkg/registry"
 
@@ -49,7 +48,6 @@ func createOp(s *store) registry.Operation {
 			{Label: "Create env bucket", Do: createEnvBucketStep(s)},
 			{Label: "Tag target instance", Do: tagInstanceStep(s), Undo: untagInstanceUndo(s)},
 			{Label: "Grant instance bucket access", Do: grantAccessStep(s), Undo: revokeAccessUndo(s)},
-			{Label: "Wait for propagation (30s)", Do: sleepStep(30 * time.Second)},
 			{Label: "SCP agent binary to instance", Do: scpAgentStep(s)},
 			{Label: "Install watcher on instance", Do: remoteInstallStep(s)},
 			{Label: "Start watcher", Do: remoteUpStep(s)},
@@ -227,17 +225,6 @@ func revokeAccessUndo(s *store) func(context.Context, *registry.State) error {
 		}
 		_ = c.SetBucketAccessForInstance(ctx, bucket, st.Input.Get("instance"), false)
 		return nil
-	}
-}
-
-func sleepStep(d time.Duration) func(context.Context, *registry.State) error {
-	return func(ctx context.Context, _ *registry.State) error {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(d):
-			return nil
-		}
 	}
 }
 

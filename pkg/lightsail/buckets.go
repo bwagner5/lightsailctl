@@ -2,8 +2,10 @@ package lightsail
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/lightsail"
@@ -119,18 +121,55 @@ func (c *Client) ListAppBuckets(ctx context.Context) ([]Bucket, error) {
 	return out, nil
 }
 
-// CreateBucket creates a Lightsail bucket with the small bundle. No-op (nil
-// error) if the bucket already exists.
+// CreateBucket creates a Lightsail bucket with the small bundle, then
+// blocks until the bucket reports state=OK (or timeout). Lightsail
+// CreateBucket returns before the bucket is actually usable, so callers
+// that will immediately mint access keys or call SetResourceAccessForBucket
+// would otherwise hit eventual-consistency errors. No-op (nil error) if
+// the bucket already exists.
 func (c *Client) CreateBucket(ctx context.Context, name string) error {
 	bundle := DefaultBundle
 	_, err := c.ls.CreateBucket(ctx, &lightsail.CreateBucketInput{
 		BucketName: &name,
 		BundleId:   &bundle,
 	})
-	if err != nil && isAlreadyExists(err) {
-		return nil
+	if err != nil && !isAlreadyExists(err) {
+		return err
 	}
-	return err
+	return c.WaitForBucketReady(ctx, name)
+}
+
+// WaitForBucketReady polls GetBucket until its state.code == "OK" or a
+// 3-minute timeout elapses. Bucket creation is eventually-consistent in
+// Lightsail; in practice it takes ~15-60s to become usable.
+func (c *Client) WaitForBucketReady(ctx context.Context, name string) error {
+	deadline := time.Now().Add(3 * time.Minute)
+	delay := 2 * time.Second
+	for {
+		out, err := c.ls.GetBuckets(ctx, &lightsail.GetBucketsInput{
+			BucketName: aws.String(name),
+		})
+		if err == nil {
+			for _, b := range out.Buckets {
+				if b.Name != nil && *b.Name == name && b.State != nil {
+					if aws.ToString(b.State.Code) == "OK" {
+						return nil
+					}
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("bucket %q not ready after 3m", name)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		if delay < 10*time.Second {
+			delay += 2 * time.Second
+		}
+	}
 }
 
 func isAlreadyExists(err error) bool {
