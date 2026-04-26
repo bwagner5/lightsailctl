@@ -44,7 +44,7 @@ func createOp(s *store) registry.Operation {
 		},
 		Steps: []registry.Step{
 			{Label: "Resolve region from instance", Do: resolveRegionStep(s)},
-			{Label: "Pin region", Do: pinRegionStep(s)},
+			{Label: "Pin region", Do: pinRegionStep(s), Undo: unpinStoreStep(s)},
 			{Label: "Verify agent binary exists", Do: verifyAgentStep},
 			{Label: "Create app-config bucket", Do: createAppBucketStep(s)},
 			{Label: "Create env bucket", Do: createEnvBucketStep(s)},
@@ -54,6 +54,7 @@ func createOp(s *store) registry.Operation {
 			{Label: "Install watcher on instance", Do: remoteInstallStep(s)},
 			{Label: "Start watcher", Do: remoteUpStep(s)},
 			{Label: "Save lightsail.conf", Do: saveConfigStep},
+			{Label: "Restore global view", Do: unpinStoreStep(s)},
 		},
 	}
 }

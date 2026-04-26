@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bwagner5/triad/pkg/trace"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/lightsail"
 )
@@ -61,7 +63,18 @@ func (c *Client) ListBuckets(ctx context.Context) ([]Bucket, error) {
 			}
 		}
 	}
+	trace.Log("lightsail.ListBuckets.regional", "region", c.cfg.Region, "count", len(buckets), "names", bucketNames(buckets))
 	return buckets, nil
+}
+
+// bucketNames is a trace helper that returns just the names so log
+// lines stay readable.
+func bucketNames(bs []Bucket) []string {
+	out := make([]string, 0, len(bs))
+	for _, b := range bs {
+		out = append(out, b.Name+"/"+b.State)
+	}
+	return out
 }
 
 // StreamBuckets fans out ListBuckets across regions and pushes one batch

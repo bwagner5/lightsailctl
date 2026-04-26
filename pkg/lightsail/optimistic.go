@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/bwagner5/triad/pkg/trace"
 )
 
 // sharedOptimisticCache is a process-level cache consulted by every
@@ -163,5 +165,6 @@ func (c *Client) AnnounceBucket(name, region string) {
 	if c.optimistic == nil || name == "" {
 		return
 	}
+	trace.Log("lightsail.AnnounceBucket", "name", name, "region", region, "path", c.optimistic.path)
 	c.optimistic.addBucket(Bucket{Name: name, State: "PENDING", Region: region}, 10*time.Minute)
 }

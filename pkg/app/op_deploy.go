@@ -49,10 +49,10 @@ func deployOp(s *store) registry.Operation {
 			// conf_existed + conf_complete in st.Data; the two
 			// user-facing rows below pick which to render.
 			{Label: "Inspect lightsail.conf", Do: detectConfStep},
-			{Label: "Resolve region from instance", Do: resolveRegionFromInstanceStep(s), Skip: skipIfRegionSet},
+			{Label: "Resolve region from instance", Do: resolveRegionFromInstanceStep(s), Skip: skipIfRegionSet, Undo: unpinStoreStep(s)},
 			{Label: "Create lightsail.conf", Do: saveConfigStep, Skip: skipIfConfDetected},
 			{Label: "Detected lightsail.conf", Do: noopStep, Skip: skipIfConfNotDetected},
-			{Label: "Check app exists (create if missing)", Do: ensureAppStep(s)},
+			{Label: "Check app exists (create if missing)", Do: ensureAppStep(s), Undo: unpinStoreStep(s)},
 			// Publish an optimistic entry to the shared cache as soon as
 			// we know we're creating, BEFORE the slow bucket-create
 			// steps run. The TUI's next refresh picks it up and the new
@@ -75,7 +75,25 @@ func deployOp(s *store) registry.Operation {
 			{Label: "Open firewall ports from compose", Do: firewallStep(s)},
 			{Label: "Release bucket key", Do: releaseKeyStep},
 			{Label: "Wait for healthy", Do: waitStep(s), Skip: skipIfNoWait},
+			// Unpin the store so the next TUI refresh fans out across
+			// ALL regions again rather than staying pinned to whichever
+			// region this deploy touched. Without this, the app list
+			// post-deploy is limited to the single-region view and
+			// other-region apps vanish from the table.
+			{Label: "Restore global view", Do: unpinStoreStep(s)},
 		},
+	}
+}
+
+// unpinStoreStep clears the store's region and forces a fresh client on
+// next ensure, so subsequent refreshes go back to the global fanout.
+func unpinStoreStep(s *store) func(context.Context, *registry.State) error {
+	return func(_ context.Context, _ *registry.State) error {
+		if s.region != nil {
+			*s.region = ""
+		}
+		s.client = nil
+		return nil
 	}
 }
 
@@ -277,6 +295,11 @@ func findBucket(ctx context.Context, c *lightsail.Client, name string) *lightsai
 	return nil
 }
 
+// pinRegion makes the store's client region-specific. Temporary: callers
+// running inside a saga MUST pair this with an unpin step (or an Undo)
+// so the post-saga TUI list view goes back to multi-region fanout. A
+// permanently pinned store hides apps outside that region from the
+// refresh.
 func pinRegion(s *store, region string) {
 	if s.region != nil && region != "" && *s.region != region {
 		*s.region = region
