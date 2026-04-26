@@ -42,3 +42,22 @@ func TestOptimisticCache_Forget(t *testing.T) {
 		t.Fatalf("forget should remove entry, got %+v", got)
 	}
 }
+
+// TestOptimisticCache_DiskRoundTrip asserts entries survive a process
+// boundary via the on-disk JSON file. Two independent cache instances
+// pointed at the same path simulate sequential processes (CLI deploy
+// followed by TUI launch).
+func TestOptimisticCache_DiskRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/cache.json"
+
+	first := &optimisticCache{path: path}
+	first.addBucket(Bucket{Name: "ls--a--b--app-x", State: "OK", Region: "us-east-1"}, time.Hour)
+
+	second := &optimisticCache{path: path}
+	second.loadLocked()
+	got := second.merge(nil)
+	if len(got) != 1 || got[0].Name != "ls--a--b--app-x" {
+		t.Fatalf("expected disk-persisted entry to survive, got %+v", got)
+	}
+}

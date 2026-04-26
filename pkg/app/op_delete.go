@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/bwagner5/triad/pkg/registry"
 
+	"github.com/aws/lightsailctl/pkg/config"
 	"github.com/aws/lightsailctl/pkg/lightsail"
 )
 
@@ -58,8 +60,47 @@ func deleteOp(s *store, suggest func(context.Context) ([]registry.Choice, error)
 				}
 				return deleteAppBuckets(ctx, c, st.Input.Get("name"))
 			}},
+			{Label: "Remove local lightsail.conf", Do: removeLocalConfStep, Skip: skipIfNoMatchingLocalConf},
 		},
 	}
+}
+
+// removeLocalConfStep deletes ./lightsail.conf (or the nearest parent) when
+// its App field matches the app being deleted. No-op when the conf isn't
+// present, doesn't match, or can't be read.
+func removeLocalConfStep(_ context.Context, st *registry.State) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil //nolint:nilerr // local-conf cleanup is best-effort
+	}
+	p := config.Find(cwd)
+	if p == "" {
+		return nil
+	}
+	cfg, err := config.Load(p)
+	if err != nil || cfg.App != st.Input.Get("name") {
+		return nil //nolint:nilerr
+	}
+	return os.Remove(p)
+}
+
+// skipIfNoMatchingLocalConf hides the "Remove local lightsail.conf" row
+// when there's nothing local to remove — avoids an empty green row on a
+// TUI delete where the user's cwd has nothing to do with the app.
+func skipIfNoMatchingLocalConf(st *registry.State) bool {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return true
+	}
+	p := config.Find(cwd)
+	if p == "" {
+		return true
+	}
+	cfg, err := config.Load(p)
+	if err != nil {
+		return true
+	}
+	return cfg.App != st.Input.Get("name")
 }
 
 // deleteAppBuckets removes every bucket belonging to appName (env buckets +

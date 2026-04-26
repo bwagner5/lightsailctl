@@ -74,7 +74,7 @@ func NewWithOptions(ctx context.Context, opts Options) (*Client, error) {
 		cfg:         cfg,
 		sts:         sts.NewFromConfig(cfg),
 		regionHints: opts.RegionHints,
-		optimistic:  &optimisticCache{},
+		optimistic:  sharedOptimisticCache,
 	}
 	if cfg.Region != "" {
 		c.ls = lightsail.NewFromConfig(cfg)
