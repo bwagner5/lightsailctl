@@ -128,6 +128,9 @@ func (c *Client) ListAppBuckets(ctx context.Context) ([]Bucket, error) {
 // would otherwise hit eventual-consistency errors. No-op (nil error) if
 // the bucket already exists.
 func (c *Client) CreateBucket(ctx context.Context, name string) error {
+	if err := ValidateBucketName(name); err != nil {
+		return err
+	}
 	bundle := DefaultBundle
 	_, err := c.ls.CreateBucket(ctx, &lightsail.CreateBucketInput{
 		BucketName: &name,
@@ -173,6 +176,48 @@ func (c *Client) WaitForBucketReady(ctx context.Context, name string) error {
 			delay += 2 * time.Second
 		}
 	}
+}
+
+// ValidateBucketName enforces Lightsail's bucket-name rules at the last
+// mile so a bad name built from empty/odd Input components fails before
+// the API call instead of as an opaque server error.
+//
+// Rules (from the Lightsail docs): 3-54 chars, lowercase letters /
+// digits / hyphens only, must begin and end with a letter or digit, no
+// consecutive hyphens. Our internal naming scheme never produces
+// uppercase, dots, or underscores, but can produce empty segments
+// (e.g. ls--123--  if app name ever slips through as "") so the
+// trailing-dash check is the one that actually catches real bugs.
+func ValidateBucketName(name string) error {
+	if len(name) < 3 || len(name) > 54 {
+		return fmt.Errorf("bucket name %q: length must be 3-54", name)
+	}
+	if !isAlnum(name[0]) {
+		return fmt.Errorf("bucket name %q: must start with a letter or digit", name)
+	}
+	if !isAlnum(name[len(name)-1]) {
+		return fmt.Errorf("bucket name %q: must not end with %q", name, name[len(name)-1])
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case isAlnum(c):
+			continue
+		case c == '-':
+			if i+1 < len(name) && name[i+1] == '-' {
+				// Our naming uses '--' intentionally as a separator
+				// (ls--<acct>--<app>--<env>), so skip over the pair.
+				i++
+			}
+		default:
+			return fmt.Errorf("bucket name %q: invalid character %q", name, c)
+		}
+	}
+	return nil
+}
+
+func isAlnum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
 }
 
 func isAlreadyExists(err error) bool {
