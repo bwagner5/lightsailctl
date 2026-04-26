@@ -27,41 +27,158 @@ func deleteOp(s *store, suggest func(context.Context) ([]registry.Choice, error)
 			{Flag: "name", Short: "n", Help: "app name", Required: true, Suggest: suggest},
 		},
 		Steps: []registry.Step{
-			{Label: "Untag target instances", Do: func(ctx context.Context, st *registry.State) error {
-				c, err := s.ensure(ctx)
-				if err != nil {
-					return err
-				}
-				refs, err := c.UntagInstancesForApp(ctx, st.Input.Get("name"))
-				st.Data["targets"] = refs
-				return err
-			}},
-			{Label: "Reset firewalls on unused instances", Do: func(ctx context.Context, st *registry.State) error {
-				c, err := s.ensure(ctx)
-				if err != nil {
-					return err
-				}
-				refs, _ := st.Data["targets"].([]lightsail.TargetRef)
-				seen := map[string]struct{}{}
-				for _, r := range refs {
-					if _, ok := seen[r.Instance]; ok {
-						continue
-					}
-					seen[r.Instance] = struct{}{}
-					// best-effort; a still-tagged instance is skipped inside ResetFirewallIfUnused
-					_ = c.ResetFirewallIfUnused(ctx, r.Instance, r.Region)
-				}
-				return nil
-			}},
-			{Label: "Delete buckets", Do: func(ctx context.Context, st *registry.State) error {
-				c, err := s.ensure(ctx)
-				if err != nil {
-					return err
-				}
-				return deleteAppBuckets(ctx, c, st.Input.Get("name"))
-			}},
+			{Label: "Discover target instances", Do: discoverTargetsStep(s)},
+			{Label: "Untag target instances", Do: untagTargetsStep(s), Skip: skipIfNoTargets},
+			{Label: "Reset firewalls on unused instances", Do: resetFirewallsStep(s), Skip: skipIfNoTargets},
+			{Label: "List app buckets", Do: listBucketsForDeleteStep(s)},
+			{Label: "Delete env buckets", Do: deleteEnvBucketsStep(s), Skip: skipIfNoEnvBuckets},
+			{Label: "Delete app-config bucket", Do: deleteAppConfigBucketStep(s), Skip: skipIfNoAppConfigBucket},
 			{Label: "Remove local lightsail.conf", Do: removeLocalConfStep, Skip: skipIfNoMatchingLocalConf},
+			{Label: "Forget optimistic cache entries", Do: forgetOptimisticStep(s)},
 		},
+	}
+}
+
+// discoverTargetsStep lists instances tagged for this app so later steps
+// can reference them (and show accurate counts in their progress output
+// via the runtime's step-level output buffer).
+func discoverTargetsStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		refs, err := c.FindTargetsForApp(ctx, st.Input.Get("name"))
+		if err != nil {
+			return err
+		}
+		st.Data["targets"] = refs
+		return nil
+	}
+}
+
+func skipIfNoTargets(st *registry.State) bool {
+	refs, _ := st.Data["targets"].([]lightsail.TargetRef)
+	return len(refs) == 0
+}
+
+func untagTargetsStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		_, err = c.UntagInstancesForApp(ctx, st.Input.Get("name"))
+		return err
+	}
+}
+
+func resetFirewallsStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		refs, _ := st.Data["targets"].([]lightsail.TargetRef)
+		seen := map[string]struct{}{}
+		for _, r := range refs {
+			if _, ok := seen[r.Instance]; ok {
+				continue
+			}
+			seen[r.Instance] = struct{}{}
+			_ = c.ResetFirewallIfUnused(ctx, r.Instance, r.Region)
+		}
+		return nil
+	}
+}
+
+// listBucketsForDeleteStep splits the app's buckets into env vs app-config
+// so the two categories can show as separate steps. Env buckets (plural)
+// are grouped; the app-config bucket is singular.
+func listBucketsForDeleteStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		all, err := c.ListAppBuckets(ctx)
+		if err != nil {
+			return err
+		}
+		name := st.Input.Get("name")
+		var envBuckets []lightsail.Bucket
+		var appConfig *lightsail.Bucket
+		for i := range all {
+			b := all[i]
+			if a, _ := lightsail.ParseAppEnv(b.Name); a == name {
+				envBuckets = append(envBuckets, b)
+				continue
+			}
+			if lightsail.ParseAppFromAppBucket(b.Name) == name {
+				appConfig = &b
+			}
+		}
+		st.Data["env_buckets"] = envBuckets
+		st.Data["app_config_bucket"] = appConfig
+		return nil
+	}
+}
+
+func skipIfNoEnvBuckets(st *registry.State) bool {
+	bs, _ := st.Data["env_buckets"].([]lightsail.Bucket)
+	return len(bs) == 0
+}
+
+func skipIfNoAppConfigBucket(st *registry.State) bool {
+	b, _ := st.Data["app_config_bucket"].(*lightsail.Bucket)
+	return b == nil
+}
+
+func deleteEnvBucketsStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		bs, _ := st.Data["env_buckets"].([]lightsail.Bucket)
+		var firstErr error
+		for _, b := range bs {
+			if err := c.DeleteBucket(ctx, b.Name, b.Region); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("delete %s: %w", b.Name, err)
+			}
+		}
+		return firstErr
+	}
+}
+
+func deleteAppConfigBucketStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		b, _ := st.Data["app_config_bucket"].(*lightsail.Bucket)
+		if b == nil {
+			return nil
+		}
+		return c.DeleteBucket(ctx, b.Name, b.Region)
+	}
+}
+
+func forgetOptimisticStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return nil //nolint:nilerr // cache purge is best-effort
+		}
+		envs, _ := st.Data["env_buckets"].([]lightsail.Bucket)
+		for _, b := range envs {
+			c.ForgetOptimistic(b.Name)
+		}
+		if b, _ := st.Data["app_config_bucket"].(*lightsail.Bucket); b != nil {
+			c.ForgetOptimistic(b.Name)
+		}
+		return nil
 	}
 }
 
@@ -101,29 +218,4 @@ func skipIfNoMatchingLocalConf(st *registry.State) bool {
 		return true
 	}
 	return cfg.App != st.Input.Get("name")
-}
-
-// deleteAppBuckets removes every bucket belonging to appName (env buckets +
-// app-config bucket). Returns the first failure; successful deletions are
-// kept (best-effort — partial cleanup is still progress).
-func deleteAppBuckets(ctx context.Context, c *lightsail.Client, appName string) error {
-	buckets, err := c.ListAppBuckets(ctx)
-	if err != nil {
-		return err
-	}
-	var firstErr error
-	for _, b := range buckets {
-		if a, _ := lightsail.ParseAppEnv(b.Name); a == appName {
-			if err := c.DeleteBucket(ctx, b.Name, b.Region); err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("delete %s: %w", b.Name, err)
-			}
-			continue
-		}
-		if lightsail.ParseAppFromAppBucket(b.Name) == appName {
-			if err := c.DeleteBucket(ctx, b.Name, b.Region); err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("delete %s: %w", b.Name, err)
-			}
-		}
-	}
-	return firstErr
 }

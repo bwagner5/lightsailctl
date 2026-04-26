@@ -145,3 +145,12 @@ func (o *optimisticCache) saveLocked() {
 	}
 	_ = os.WriteFile(o.path, data, 0o644)
 }
+
+// ForgetOptimistic removes a bucket from the optimistic cache (called
+// after a successful delete so the table doesn't keep surfacing a dead
+// entry for the remainder of the TTL).
+func (c *Client) ForgetOptimistic(name string) {
+	if c.optimistic != nil {
+		c.optimistic.forget(name)
+	}
+}

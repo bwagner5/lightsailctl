@@ -16,6 +16,28 @@ import (
 //
 // Works globally: if the parent Client is unpinned, ListInstances fans out
 // across every region; each Untag call is dispatched to a regional client
+// FindTargetsForApp returns every instance currently tagged for the app
+// (one TargetRef per env tag). Read-only counterpart to
+// UntagInstancesForApp for steps that want to report counts before
+// taking destructive action.
+func (c *Client) FindTargetsForApp(ctx context.Context, appName string) ([]TargetRef, error) {
+	instances, err := c.ListInstances(ctx)
+	if err != nil {
+		return nil, err
+	}
+	prefix := TagPrefix + appName + ":"
+	var out []TargetRef
+	for _, inst := range instances {
+		for k := range inst.Tags {
+			if strings.HasPrefix(k, prefix) {
+				env := strings.TrimPrefix(k, prefix)
+				out = append(out, TargetRef{Instance: inst.Name, Env: env, Region: inst.Region})
+			}
+		}
+	}
+	return out, nil
+}
+
 // scoped to the instance's own region.
 func (c *Client) UntagInstancesForApp(ctx context.Context, appName string) ([]TargetRef, error) {
 	instances, err := c.ListInstances(ctx)
