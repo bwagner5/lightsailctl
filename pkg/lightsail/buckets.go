@@ -156,12 +156,17 @@ func (c *Client) CreateBucket(ctx context.Context, name string) error {
 	if err != nil && !isAlreadyExists(err) {
 		return err
 	}
+	// Record the optimistic hit IMMEDIATELY — before the readiness wait,
+	// which can block for minutes. We want the bucket to show in the
+	// table as soon as AWS accepted CreateBucket, so the TUI feels
+	// snappy. State starts as "PENDING" and is upgraded once the bucket
+	// is ready (state=OK).
+	if c.optimistic != nil {
+		c.optimistic.addBucket(Bucket{Name: name, State: "PENDING", Region: c.cfg.Region}, 10*time.Minute)
+	}
 	if werr := c.WaitForBucketReady(ctx, name); werr != nil {
 		return werr
 	}
-	// Record the optimistic hit so the next ListBuckets returns the
-	// bucket even if the region's GetBuckets hasn't caught up yet.
-	// 10 minutes is generous relative to observed propagation (~15-60s).
 	if c.optimistic != nil {
 		c.optimistic.addBucket(Bucket{Name: name, State: "OK", Region: c.cfg.Region}, 10*time.Minute)
 	}

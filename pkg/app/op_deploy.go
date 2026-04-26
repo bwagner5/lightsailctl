@@ -53,6 +53,12 @@ func deployOp(s *store) registry.Operation {
 			{Label: "Create lightsail.conf", Do: saveConfigStep, Skip: skipIfConfDetected},
 			{Label: "Detected lightsail.conf", Do: noopStep, Skip: skipIfConfNotDetected},
 			{Label: "Check app exists (create if missing)", Do: ensureAppStep(s)},
+			// Publish an optimistic entry to the shared cache as soon as
+			// we know we're creating, BEFORE the slow bucket-create
+			// steps run. The TUI's next refresh picks it up and the new
+			// app appears in the table within seconds rather than
+			// minutes.
+			{Label: "Announce new app to the table", Do: announceOptimisticStep(s), Skip: skipIfAppExists},
 			// Create sub-steps run only when ensureAppStep decided we
 			// need to. Skipped on subsequent deploys to an existing app.
 			{Label: "Verify agent binary", Do: verifyAgentStep, Skip: skipIfAppExists},
@@ -216,6 +222,27 @@ func ensureAppStep(s *store) func(context.Context, *registry.State) error {
 func skipIfAppExists(st *registry.State) bool {
 	v, _ := st.Data["needs-create"].(bool)
 	return !v
+}
+
+// announceOptimisticStep seeds the shared optimistic bucket cache with
+// the env bucket (and app-config bucket) so the TUI table shows the new
+// app immediately on the next refresh, well before the real CreateBucket
+// calls finish. Values are upgraded to state=OK once the real buckets
+// come up.
+func announceOptimisticStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return nil //nolint:nilerr // pre-announce is best-effort
+		}
+		acct, _ := st.Data["acct"].(string)
+		region := st.Input.Get("region")
+		envBucket, _ := st.Data["bucket"].(string)
+		appBucket := lightsail.AppBucketName(acct, st.Input.Get("name"))
+		c.AnnounceBucket(envBucket, region)
+		c.AnnounceBucket(appBucket, region)
+		return nil
+	}
 }
 
 // regionOfInstance finds the AWS region of a Lightsail instance by its
