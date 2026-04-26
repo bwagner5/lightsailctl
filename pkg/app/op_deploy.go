@@ -27,6 +27,7 @@ import (
 func deployOp(s *store) registry.Operation {
 	return registry.Operation{
 		Name: "deploy", Key: "d", Short: "deploy current dir to an app/env",
+		Confirm: "Ready to deploy with these settings?",
 		Fields: []registry.Field{
 			// Prefill (not Default) so the wizard opens with the git
 			// repo name / space-themed random pre-filled — user hits

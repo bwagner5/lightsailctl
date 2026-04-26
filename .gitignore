@@ -1,2 +1,3 @@
 dist/
 *-trace.log
+lightsail.conf

@@ -31,6 +31,7 @@ import (
 func createOp(s *store) registry.Operation {
 	return registry.Operation{
 		Name: "create", Key: "c", Short: "create a new Lightsail application",
+		Confirm: "Create this Lightsail application?",
 		Fields: []registry.Field{
 			{Flag: "name", Short: "n", Help: "app name", Prefill: names.DefaultAppName,
 				Required: true, Validate: names.ValidateLabel},
