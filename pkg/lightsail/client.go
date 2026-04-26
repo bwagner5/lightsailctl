@@ -20,6 +20,10 @@ type Client struct {
 	// regionHints are callers' priority hints (typically AWS_REGION /
 	// AWS_DEFAULT_REGION resolved in main) used to re-order FetchRegions.
 	regionHints []string
+	// optimistic caches buckets the caller just created so ListBuckets
+	// returns them immediately even when Lightsail is still propagating
+	// the create. Shared across WithRegion copies via pointer.
+	optimistic *optimisticCache
 }
 
 // Options configures Client construction.
@@ -70,6 +74,7 @@ func NewWithOptions(ctx context.Context, opts Options) (*Client, error) {
 		cfg:         cfg,
 		sts:         sts.NewFromConfig(cfg),
 		regionHints: opts.RegionHints,
+		optimistic:  &optimisticCache{},
 	}
 	if cfg.Region != "" {
 		c.ls = lightsail.NewFromConfig(cfg)
@@ -86,7 +91,7 @@ func (c *Client) Region() string { return c.cfg.Region }
 func (c *Client) WithRegion(region string) *Client {
 	cfg := c.cfg.Copy()
 	cfg.Region = region
-	out := &Client{cfg: cfg, sts: sts.NewFromConfig(cfg), regionHints: c.regionHints}
+	out := &Client{cfg: cfg, sts: sts.NewFromConfig(cfg), regionHints: c.regionHints, optimistic: c.optimistic}
 	if region != "" {
 		out.ls = lightsail.NewFromConfig(cfg)
 	}

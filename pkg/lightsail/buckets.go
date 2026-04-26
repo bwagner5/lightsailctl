@@ -27,7 +27,14 @@ type Bucket struct {
 // doesn't kill the global list.
 func (c *Client) ListBuckets(ctx context.Context) ([]Bucket, error) {
 	if c.Region() == "" {
-		return c.listBucketsGlobal(ctx)
+		out, err := c.listBucketsGlobal(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if c.optimistic != nil {
+			out = c.optimistic.merge(out)
+		}
+		return out, nil
 	}
 	out, err := c.ls.GetBuckets(ctx, &lightsail.GetBucketsInput{})
 	if err != nil {
@@ -43,6 +50,16 @@ func (c *Client) ListBuckets(ctx context.Context) ([]Bucket, error) {
 			bkt.Region = string(b.Location.RegionName)
 		}
 		buckets = append(buckets, bkt)
+	}
+	if c.optimistic != nil {
+		// Only include optimistic entries that match this region.
+		merged := c.optimistic.merge(buckets)
+		buckets = merged[:0:len(merged)]
+		for _, b := range merged {
+			if b.Region == "" || b.Region == c.cfg.Region {
+				buckets = append(buckets, b)
+			}
+		}
 	}
 	return buckets, nil
 }
@@ -139,7 +156,16 @@ func (c *Client) CreateBucket(ctx context.Context, name string) error {
 	if err != nil && !isAlreadyExists(err) {
 		return err
 	}
-	return c.WaitForBucketReady(ctx, name)
+	if werr := c.WaitForBucketReady(ctx, name); werr != nil {
+		return werr
+	}
+	// Record the optimistic hit so the next ListBuckets returns the
+	// bucket even if the region's GetBuckets hasn't caught up yet.
+	// 10 minutes is generous relative to observed propagation (~15-60s).
+	if c.optimistic != nil {
+		c.optimistic.addBucket(Bucket{Name: name, State: "OK", Region: c.cfg.Region}, 10*time.Minute)
+	}
+	return nil
 }
 
 // WaitForBucketReady polls GetBucket until its state.code == "OK" or a

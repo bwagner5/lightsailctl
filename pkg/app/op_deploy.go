@@ -45,7 +45,18 @@ func deployOp(s *store) registry.Operation {
 		},
 		Steps: []registry.Step{
 			{Label: "Resolve app/env/region from flags + lightsail.conf", Do: resolveStep(s)},
-			{Label: "Ensure app exists (auto-create if missing)", Do: ensureAppStep(s)},
+			{Label: "Check app exists (create if missing)", Do: ensureAppStep(s)},
+			// Create sub-steps run only when ensureAppStep decided we need to.
+			// Each one shows up individually in the saga overlay so users see
+			// progress instead of a single minute-long spinner.
+			{Label: "Verify agent binary", Do: verifyAgentStep, Skip: skipIfAppExists},
+			{Label: "Create app-config bucket", Do: createAppBucketStep(s), Skip: skipIfAppExists},
+			{Label: "Create env bucket", Do: createEnvBucketStep(s), Skip: skipIfAppExists},
+			{Label: "Tag target instance", Do: tagInstanceStep(s), Skip: skipIfAppExists},
+			{Label: "Grant instance bucket access", Do: grantAccessStep(s), Skip: skipIfAppExists},
+			{Label: "Copy agent binary to instance", Do: scpAgentStep(s), Skip: skipIfAppExists},
+			{Label: "Install agent on instance", Do: remoteInstallStep(s), Skip: skipIfAppExists},
+			{Label: "Start agent on instance", Do: remoteUpStep(s), Skip: skipIfAppExists},
 			{Label: "Persist lightsail.conf", Do: saveConfigStep},
 			{Label: "Package source", Do: packageStep, Undo: packageUndo},
 			{Label: "Acquire bucket key + S3 client", Do: acquireKeyStep(s), Undo: acquireKeyUndo},
@@ -110,9 +121,10 @@ func resolveStep(s *store) func(context.Context, *registry.State) error {
 }
 
 // ensureAppStep: the env bucket must exist or we can't deploy. When it's
-// missing, ask the user (via registry.NeedInput) for just the inputs the
-// create flow needs — instance + agent-path. The region is INFERRED from
-// the picked instance (the user never picks a region separately).
+// missing, ask the user (via registry.NeedInput) for the create inputs,
+// then mark st.Data["needs-create"]=true so the subsequent saga steps
+// (each rendered individually) run the create flow. If the bucket
+// already exists, "needs-create" stays false and those steps skip.
 func ensureAppStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		c, err := s.ensure(ctx)
@@ -128,6 +140,7 @@ func ensureAppStep(s *store) func(context.Context, *registry.State) error {
 		if b := findBucket(ctx, c, envBucket); b != nil {
 			st.Data["bucket"] = envBucket
 			pinRegion(s, b.Region)
+			st.Data["needs-create"] = false
 			return nil
 		}
 
@@ -145,13 +158,19 @@ func ensureAppStep(s *store) func(context.Context, *registry.State) error {
 			}
 			st.Input["region"] = region
 		}
-		// Run create inline.
-		if err := runCreateInline(ctx, s, st); err != nil {
-			return err
-		}
-		st.Data["bucket"] = lightsail.EnvBucketName(acct, st.Input.Get("name"), st.Input.Get("env"))
+		pinRegion(s, st.Input.Get("region"))
+		// Let the per-step create sub-steps run in sequence.
+		st.Data["needs-create"] = true
+		st.Data["bucket"] = envBucket
 		return nil
 	}
+}
+
+// skipIfAppExists returns true when ensureAppStep already confirmed the
+// app is live. The create sub-steps skip themselves in that case.
+func skipIfAppExists(st *registry.State) bool {
+	v, _ := st.Data["needs-create"].(bool)
+	return !v
 }
 
 // regionOfInstance finds the AWS region of a Lightsail instance by its
@@ -214,30 +233,6 @@ func needInputForCreate(needInstance, needAgent bool, s *store, app, env string)
 		Fields: fields,
 		Reason: fmt.Sprintf("app %q / env %q doesn't exist yet — let's create it", app, env),
 	}
-}
-
-// runCreateInline executes the create saga's side-effect steps directly.
-// Requires region to already be set in Input (derived from the picked
-// instance in ensureAppStep).
-func runCreateInline(ctx context.Context, s *store, st *registry.State) error {
-	pinRegion(s, st.Input.Get("region"))
-
-	for _, do := range []func(context.Context, *registry.State) error{
-		verifyAgentStep,
-		createAppBucketStep(s),
-		createEnvBucketStep(s),
-		tagInstanceStep(s),
-		grantAccessStep(s),
-		scpAgentStep(s),
-		remoteInstallStep(s),
-		remoteUpStep(s),
-		saveConfigStep,
-	} {
-		if err := do(ctx, st); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func packageStep(ctx context.Context, st *registry.State) error {

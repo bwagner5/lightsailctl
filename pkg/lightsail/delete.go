@@ -81,6 +81,9 @@ func (c *Client) DeleteBucket(ctx context.Context, name, region string) error {
 		BucketName:  aws.String(name),
 		ForceDelete: &force,
 	})
+	if c.optimistic != nil {
+		c.optimistic.forget(name)
+	}
 	return err
 }
 
