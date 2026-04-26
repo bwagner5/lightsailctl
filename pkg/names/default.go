@@ -2,6 +2,7 @@ package names
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -86,7 +87,11 @@ func parseOriginName(configPath string) string {
 // sanitize lowercases and replaces non-alphanumeric runs with a single
 // dash so the name slots cleanly into S3 bucket names and DNS-like
 // constraints.
-func sanitize(s string) string {
+func sanitize(s string) string { return Sanitize(s) }
+
+// Sanitize produces a Lightsail-bucket-safe token: lowercase alphanumerics
+// with single-dash separators, no leading/trailing dashes.
+func Sanitize(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	var b strings.Builder
 	lastDash := true
@@ -104,4 +109,33 @@ func sanitize(s string) string {
 	}
 	out := b.String()
 	return strings.Trim(out, "-")
+}
+
+// ValidateLabel returns an error when s is not a valid Lightsail bucket
+// segment: non-empty, all-lowercase alphanumerics with optional single
+// dashes, no leading/trailing dash, max 63 chars (Lightsail bucket name
+// total is 54 but segments are smaller; this is a safe per-segment cap).
+func ValidateLabel(s string) error {
+	if s == "" {
+		return fmt.Errorf("required")
+	}
+	if len(s) > 40 {
+		return fmt.Errorf("too long (max 40 chars)")
+	}
+	if s[0] == '-' || s[len(s)-1] == '-' {
+		return fmt.Errorf("must not begin or end with '-'")
+	}
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			continue
+		case r == '-':
+			if i+1 < len(s) && s[i+1] == '-' {
+				return fmt.Errorf("must not contain '--'")
+			}
+		default:
+			return fmt.Errorf("invalid character %q (use a-z, 0-9, '-')", r)
+		}
+	}
+	return nil
 }

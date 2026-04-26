@@ -31,8 +31,9 @@ func deployOp(s *store) registry.Operation {
 			// Prefill (not Default) so the wizard opens with the git
 			// repo name / space-themed random pre-filled — user hits
 			// Enter to accept, or types to override.
-			{Flag: "name", Short: "n", Help: "app name", Required: true, Prefill: names.DefaultAppName},
-			{Flag: "env", Short: "e", Help: "environment", Default: "dev"},
+			{Flag: "name", Short: "n", Help: "app name", Required: true,
+				Prefill: names.DefaultAppName, Validate: names.ValidateLabel},
+			{Flag: "env", Short: "e", Help: "environment", Default: "dev", Validate: names.ValidateLabel},
 			{Flag: "region", Help: "AWS region"},
 			{Flag: "wait-timeout", Help: "how long to wait for healthy (0 with --no-wait)", Default: "3m"},
 			{Flag: "no-wait", Help: "upload and exit without waiting for health", Default: "false"},

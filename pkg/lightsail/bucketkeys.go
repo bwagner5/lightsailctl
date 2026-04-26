@@ -133,7 +133,7 @@ func writeOwnership(ctx context.Context, region string, key *BucketKey) error {
 	}
 	data, _ := json.Marshal(own)
 	objKey := ownerPrefix + key.AccessKey + ".json"
-	return Retryable(ctx, func(ctx context.Context) error {
+	return RetryableLong(ctx, func(ctx context.Context) error {
 		_, err := s3cli.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:      aws.String(key.Bucket),
 			Key:         aws.String(objKey),

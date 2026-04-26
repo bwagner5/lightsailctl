@@ -16,7 +16,7 @@ import (
 // Upload PUTs the tarball at localPath to s3://bucket/key with retries to
 // cover Lightsail's post-key-mint consistency window.
 func Upload(ctx context.Context, s3cli *s3.Client, bucket, key, localPath string) error {
-	return lightsail.Retryable(ctx, func(ctx context.Context) error {
+	return lightsail.RetryableLong(ctx, func(ctx context.Context) error {
 		f, err := os.Open(localPath)
 		if err != nil {
 			return lightsail.StopRetry(err)
