@@ -302,8 +302,18 @@ func saveConfigStep(ctx context.Context, st *registry.State) error {
 	if err != nil {
 		return err
 	}
+	// Merge with any existing conf so we don't drop fields we don't know
+	// about here (e.g. user-added Ignore entries).
+	existing, _ := config.Load(filepath.Join(cwd, config.Filename))
 	cfg := &config.Config{
-		App: st.Input.Get("name"), Env: st.Input.Get("env"), Region: st.Input.Get("region"),
+		App:       st.Input.Get("name"),
+		Env:       st.Input.Get("env"),
+		Region:    st.Input.Get("region"),
+		Instance:  st.Input.Get("instance"),
+		AgentPath: st.Input.Get("agent-path"),
+	}
+	if existing != nil {
+		cfg.Ignore = existing.Ignore
 	}
 	p := filepath.Join(cwd, config.Filename)
 	if err := cfg.Save(p); err != nil {

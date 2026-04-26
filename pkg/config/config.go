@@ -3,15 +3,18 @@
 //
 // Schema:
 //
-//	app:    cosmic-comet   # application name
-//	env:    dev            # environment within the app
-//	region: us-east-2      # AWS region
-//	ignore:                # extra paths excluded from the deploy tarball
+//	app:        cosmic-comet         # application name
+//	env:        dev                  # environment within the app
+//	region:     us-east-2            # AWS region
+//	instance:   my-lightsail-box     # target Lightsail instance
+//	agent-path: /path/to/lightsailctl# linux/amd64 binary to scp on first deploy
+//	ignore:                          # extra paths excluded from the tarball
 //	  - node_modules
 //	  - .venv
 //
 // `ignore` is additive: built-in excludes (.git, .lightsail, node_modules,
-// .DS_Store) are always applied.
+// .DS_Store) are always applied. agent-path is only consulted when the
+// app doesn't yet exist and needs to be created.
 package config
 
 import (
@@ -28,10 +31,12 @@ const Filename = "lightsail.conf"
 
 // Config is the on-disk schema.
 type Config struct {
-	App    string   `yaml:"app"`
-	Env    string   `yaml:"env"`
-	Region string   `yaml:"region"`
-	Ignore []string `yaml:"ignore,omitempty"`
+	App       string   `yaml:"app"`
+	Env       string   `yaml:"env"`
+	Region    string   `yaml:"region"`
+	Instance  string   `yaml:"instance,omitempty"`
+	AgentPath string   `yaml:"agent-path,omitempty"`
+	Ignore    []string `yaml:"ignore,omitempty"`
 
 	// Path is the file the Config was loaded from. Empty when not loaded.
 	Path string `yaml:"-"`

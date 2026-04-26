@@ -9,7 +9,11 @@ import (
 func TestSaveThenLoad(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "lightsail.conf")
-	orig := &Config{App: "foo", Env: "dev", Region: "us-east-2", Ignore: []string{".venv"}}
+	orig := &Config{
+		App: "foo", Env: "dev", Region: "us-east-2",
+		Instance: "box-1", AgentPath: "/tmp/lightsailctl",
+		Ignore: []string{".venv"},
+	}
 	if err := orig.Save(p); err != nil {
 		t.Fatal(err)
 	}
@@ -17,7 +21,9 @@ func TestSaveThenLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.App != "foo" || got.Env != "dev" || got.Region != "us-east-2" || len(got.Ignore) != 1 {
+	if got.App != "foo" || got.Env != "dev" || got.Region != "us-east-2" ||
+		got.Instance != "box-1" || got.AgentPath != "/tmp/lightsailctl" ||
+		len(got.Ignore) != 1 {
 		t.Errorf("roundtrip lost data: %+v", got)
 	}
 	if got.Path != p {

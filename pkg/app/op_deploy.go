@@ -46,6 +46,7 @@ func deployOp(s *store) registry.Operation {
 		Steps: []registry.Step{
 			{Label: "Resolve app/env/region from flags + lightsail.conf", Do: resolveStep(s)},
 			{Label: "Ensure app exists (auto-create if missing)", Do: ensureAppStep(s)},
+			{Label: "Persist lightsail.conf", Do: saveConfigStep},
 			{Label: "Package source", Do: packageStep, Undo: packageUndo},
 			{Label: "Acquire bucket key + S3 client", Do: acquireKeyStep(s), Undo: acquireKeyUndo},
 			{Label: "Upload deploy asset", Do: uploadStep},
@@ -69,7 +70,10 @@ func deployOp(s *store) registry.Operation {
 // resolveStep fills in app/env/region from flags, falling back to lightsail.conf.
 func resolveStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
-		// Auto-load lightsail.conf as default source.
+		// Auto-load lightsail.conf as default source. Every field the
+		// conf carries (app/env/region/instance/agent-path/ignore)
+		// becomes the default for that Input key. The conf exists so
+		// repeat deploys 'just work' without reprompting.
 		cfg, _ := config.LoadFromCwd()
 		if cfg != nil {
 			if st.Input.Get("name") == "" {
@@ -80,6 +84,12 @@ func resolveStep(s *store) func(context.Context, *registry.State) error {
 			}
 			if st.Input.Get("region") == "" {
 				st.Input["region"] = cfg.Region
+			}
+			if st.Input.Get("instance") == "" {
+				st.Input["instance"] = cfg.Instance
+			}
+			if st.Input.Get("agent-path") == "" {
+				st.Input["agent-path"] = cfg.AgentPath
 			}
 			st.Data["ignore"] = cfg.Ignore
 		}
