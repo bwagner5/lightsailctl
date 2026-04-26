@@ -27,28 +27,34 @@ import (
 func deployOp(s *store) registry.Operation {
 	return registry.Operation{
 		Name: "deploy", Key: "d", Short: "deploy current dir to an app/env",
-		// No top-level Confirm: the saga's ensureAppStep collects any
-		// missing create inputs mid-flight and the TUI fires a confirm
-		// overlay at THAT point with the full merged summary. Double-
-		// confirming (once here for half the info, again later for the
-		// rest) is noise.
 		Fields: []registry.Field{
-			// Prefill (not Default) so the wizard opens with the git
-			// repo name / space-themed random pre-filled — user hits
-			// Enter to accept, or types to override.
+			// All fields collected up front on a single wizard screen.
+			// Pre (below) hydrates from lightsail.conf so an existing
+			// conf skips the wizard entirely. Fields still empty after
+			// Pre are prompted as usual.
 			{Flag: "name", Short: "n", Help: "app name", Required: true,
 				Prefill: names.DefaultAppName, Validate: names.ValidateLabel},
 			{Flag: "env", Short: "e", Help: "environment", Default: "dev", Required: true, Validate: names.ValidateLabel},
-			{Flag: "region", Help: "AWS region"},
+			{Flag: "instance", Help: "target Lightsail instance (region inferred from it)", Required: true, Suggest: instanceSuggest(s)},
+			{Flag: "agent-path", Help: "lightsailctl binary to scp to the instance (linux/amd64)",
+				Required: true, File: true},
+			{Flag: "region", Help: "AWS region (auto-filled from --instance)"},
 			{Flag: "wait-timeout", Help: "how long to wait for healthy (0 with --no-wait)", Default: "3m"},
 			{Flag: "no-wait", Help: "upload and exit without waiting for health", Default: "false"},
 		},
+		Pre: preloadFromConf,
 		Steps: []registry.Step{
-			{Label: "Resolve app/env/region from flags + lightsail.conf", Do: resolveStep(s)},
+			// First visible step reflects the conf state to the user.
+			// detectConfStep is invisible housekeeping that records
+			// conf_existed + conf_complete in st.Data; the two
+			// user-facing rows below pick which to render.
+			{Label: "Inspect lightsail.conf", Do: detectConfStep},
+			{Label: "Resolve region from instance", Do: resolveRegionFromInstanceStep(s), Skip: skipIfRegionSet},
+			{Label: "Create lightsail.conf", Do: saveConfigStep, Skip: skipIfConfDetected},
+			{Label: "Detected lightsail.conf", Do: noopStep, Skip: skipIfConfNotDetected},
 			{Label: "Check app exists (create if missing)", Do: ensureAppStep(s)},
-			// Create sub-steps run only when ensureAppStep decided we need to.
-			// Each one shows up individually in the saga overlay so users see
-			// progress instead of a single minute-long spinner.
+			// Create sub-steps run only when ensureAppStep decided we
+			// need to. Skipped on subsequent deploys to an existing app.
 			{Label: "Verify agent binary", Do: verifyAgentStep, Skip: skipIfAppExists},
 			{Label: "Create app-config bucket", Do: createAppBucketStep(s), Skip: skipIfAppExists},
 			{Label: "Create env bucket", Do: createEnvBucketStep(s), Skip: skipIfAppExists},
@@ -57,7 +63,6 @@ func deployOp(s *store) registry.Operation {
 			{Label: "Copy agent binary to instance", Do: scpAgentStep(s), Skip: skipIfAppExists},
 			{Label: "Install agent on instance", Do: remoteInstallStep(s), Skip: skipIfAppExists},
 			{Label: "Start agent on instance", Do: remoteUpStep(s), Skip: skipIfAppExists},
-			{Label: "Persist lightsail.conf", Do: saveConfigStep},
 			{Label: "Package source", Do: packageStep, Undo: packageUndo},
 			{Label: "Acquire bucket key + S3 client", Do: acquireKeyStep(s), Undo: acquireKeyUndo},
 			{Label: "Upload deploy asset", Do: uploadStep},
@@ -78,53 +83,104 @@ func deployOp(s *store) registry.Operation {
 // "started"   time.Time         — when upload began (for since-filter)
 // ─────────────────────────────────────────────────────────────────────────
 
-// resolveStep fills in app/env/region from flags, falling back to lightsail.conf.
-func resolveStep(s *store) func(context.Context, *registry.State) error {
+// preloadFromConf is the op Pre hook: hydrates Input from lightsail.conf
+// before the wizard considers what's missing. If the conf is complete
+// the wizard shows nothing; if partial, the wizard opens with known
+// fields prefilled.
+func preloadFromConf(_ context.Context, in registry.Input) error {
+	cfg, _ := config.LoadFromCwd()
+	if cfg == nil {
+		return nil
+	}
+	if in.Get("name") == "" && cfg.App != "" {
+		in["name"] = cfg.App
+	}
+	if in.Get("env") == "" && cfg.Env != "" {
+		in["env"] = cfg.Env
+	}
+	if in.Get("region") == "" && cfg.Region != "" {
+		in["region"] = cfg.Region
+	}
+	if in.Get("instance") == "" && cfg.Instance != "" {
+		in["instance"] = cfg.Instance
+	}
+	if in.Get("agent-path") == "" && cfg.AgentPath != "" {
+		in["agent-path"] = cfg.AgentPath
+	}
+	return nil
+}
+
+// detectConfStep records in st.Data whether the conf pre-existed and
+// whether it was complete (had every field the deploy needs). The two
+// user-visible "Create lightsail.conf" / "Detected lightsail.conf" rows
+// use these flags via their Skip funcs to pick which runs.
+func detectConfStep(_ context.Context, st *registry.State) error {
+	cfg, _ := config.LoadFromCwd()
+	existed := cfg != nil
+	complete := existed &&
+		cfg.App != "" && cfg.Env != "" &&
+		cfg.Region != "" && cfg.Instance != "" && cfg.AgentPath != ""
+	st.Data["conf_existed"] = existed
+	st.Data["conf_complete"] = complete
+	return nil
+}
+
+// skipIfConfDetected skips "Create lightsail.conf" when the conf already
+// exists AND is complete. If the conf existed but was missing fields the
+// wizard just filled, we still want to rewrite.
+func skipIfConfDetected(st *registry.State) bool {
+	existed, _ := st.Data["conf_existed"].(bool)
+	complete, _ := st.Data["conf_complete"].(bool)
+	return existed && complete
+}
+
+// skipIfConfNotDetected hides the "Detected" row when we WROTE or updated
+// the conf (either fresh-create or fill-in-missing case).
+func skipIfConfNotDetected(st *registry.State) bool {
+	existed, _ := st.Data["conf_existed"].(bool)
+	complete, _ := st.Data["conf_complete"].(bool)
+	return !existed || !complete
+}
+
+// skipIfRegionSet skips the region-from-instance resolver when region
+// is already known (from conf or --region flag).
+func skipIfRegionSet(st *registry.State) bool {
+	return st.Input.Get("region") != ""
+}
+
+// noopStep is a zero-work step used purely to show a green "Detected
+// lightsail.conf" row in the saga overlay. Also propagates the ignore
+// list from the conf into st.Data for the package step.
+func noopStep(_ context.Context, st *registry.State) error {
+	if cfg, _ := config.LoadFromCwd(); cfg != nil {
+		st.Data["ignore"] = cfg.Ignore
+	}
+	return nil
+}
+
+// resolveRegionFromInstanceStep fills Input["region"] by looking up the
+// instance's region. Pre already confirmed the user has an instance name.
+func resolveRegionFromInstanceStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
-		// Auto-load lightsail.conf as default source. Every field the
-		// conf carries (app/env/region/instance/agent-path/ignore)
-		// becomes the default for that Input key. The conf exists so
-		// repeat deploys 'just work' without reprompting.
-		cfg, _ := config.LoadFromCwd()
-		if cfg != nil {
-			if st.Input.Get("name") == "" {
-				st.Input["name"] = cfg.App
-			}
-			if st.Input.Get("env") == "" {
-				st.Input["env"] = cfg.Env
-			}
-			if st.Input.Get("region") == "" {
-				st.Input["region"] = cfg.Region
-			}
-			if st.Input.Get("instance") == "" {
-				st.Input["instance"] = cfg.Instance
-			}
-			if st.Input.Get("agent-path") == "" {
-				st.Input["agent-path"] = cfg.AgentPath
-			}
-			st.Data["ignore"] = cfg.Ignore
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
 		}
-		if st.Input.Get("env") == "" {
-			st.Input["env"] = "dev"
+		region, rerr := regionOfInstance(ctx, c, st.Input.Get("instance"))
+		if rerr != nil {
+			return rerr
 		}
-		if st.Input.Get("name") == "" {
-			return errors.New("no app configured (set --name or create ./lightsail.conf)")
-		}
-		if st.Input.Get("region") != "" && s.region != nil {
-			// Pin the store to the flag-supplied region so subsequent steps
-			// hit the right Lightsail endpoint.
-			*s.region = st.Input.Get("region")
-			s.client = nil
-		}
+		st.Input["region"] = region
+		pinRegion(s, region)
 		return nil
 	}
 }
 
-// ensureAppStep: the env bucket must exist or we can't deploy. When it's
-// missing, ask the user (via registry.NeedInput) for the create inputs,
-// then mark st.Data["needs-create"]=true so the subsequent saga steps
-// (each rendered individually) run the create flow. If the bucket
-// already exists, "needs-create" stays false and those steps skip.
+// ensureAppStep: the env bucket must exist or we can't deploy. If the
+// bucket is already there, "needs-create" stays false and the subsequent
+// create sub-steps skip. If it's missing, mark needs-create=true so the
+// create sub-steps run. (No more NeedInput / mid-saga prompting — Pre +
+// the up-front wizard gave us everything.)
 func ensureAppStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		c, err := s.ensure(ctx)
@@ -136,6 +192,11 @@ func ensureAppStep(s *store) func(context.Context, *registry.State) error {
 			return err
 		}
 		st.Data["acct"] = acct
+		// Propagate the conf's ignore list for the package step.
+		// (noopStep does the same for the already-detected path.)
+		if cfg, _ := config.LoadFromCwd(); cfg != nil {
+			st.Data["ignore"] = cfg.Ignore
+		}
 		envBucket := lightsail.EnvBucketName(acct, st.Input.Get("name"), st.Input.Get("env"))
 		if b := findBucket(ctx, c, envBucket); b != nil {
 			st.Data["bucket"] = envBucket
@@ -143,23 +204,7 @@ func ensureAppStep(s *store) func(context.Context, *registry.State) error {
 			st.Data["needs-create"] = false
 			return nil
 		}
-
-		// Bucket missing. Do we have the inputs to create it?
-		needInstance := st.Input.Get("instance") == ""
-		needAgent := st.Input.Get("agent-path") == ""
-		if needInstance || needAgent {
-			return needInputForCreate(needInstance, needAgent, s, st.Input.Get("name"), st.Input.Get("env"))
-		}
-		// Inputs are filled. Derive the region from the picked instance.
-		if st.Input.Get("region") == "" {
-			region, rerr := regionOfInstance(ctx, c, st.Input.Get("instance"))
-			if rerr != nil {
-				return rerr
-			}
-			st.Input["region"] = region
-		}
 		pinRegion(s, st.Input.Get("region"))
-		// Let the per-step create sub-steps run in sequence.
 		st.Data["needs-create"] = true
 		st.Data["bucket"] = envBucket
 		return nil
@@ -214,27 +259,6 @@ func pinRegion(s *store, region string) {
 
 // needInputForCreate builds a NeedInput listing only the fields that aren't
 // already set, so the user doesn't re-answer things they already provided.
-func needInputForCreate(needInstance, needAgent bool, s *store, app, env string) error {
-	var fields []registry.Field
-	if needInstance {
-		fields = append(fields, registry.Field{
-			Flag: "instance", Required: true, Help: "target Lightsail instance",
-			Suggest: instanceSuggest(s),
-		})
-	}
-	if needAgent {
-		fields = append(fields, registry.Field{
-			Flag: "agent-path", Required: true,
-			Help: "lightsailctl binary to scp to the instance (linux/amd64)",
-			File: true, // picker accepts any file when AllowedExts is empty
-		})
-	}
-	return &registry.NeedInput{
-		Fields: fields,
-		Reason: fmt.Sprintf("app %q / env %q doesn't exist yet — let's create it", app, env),
-	}
-}
-
 func packageStep(ctx context.Context, st *registry.State) error {
 	if compose.Find() == "" {
 		return errors.New("no docker-compose.yml in current directory")
