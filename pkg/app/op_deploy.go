@@ -27,7 +27,11 @@ import (
 func deployOp(s *store) registry.Operation {
 	return registry.Operation{
 		Name: "deploy", Key: "d", Short: "deploy current dir to an app/env",
-		Confirm: "Ready to deploy with these settings?",
+		// No top-level Confirm: the saga's ensureAppStep collects any
+		// missing create inputs mid-flight and the TUI fires a confirm
+		// overlay at THAT point with the full merged summary. Double-
+		// confirming (once here for half the info, again later for the
+		// rest) is noise.
 		Fields: []registry.Field{
 			// Prefill (not Default) so the wizard opens with the git
 			// repo name / space-themed random pre-filled — user hits

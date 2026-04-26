@@ -7,6 +7,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -18,11 +19,14 @@ import (
 
 // App is one row in the apps table.
 type App struct {
-	Name   string
-	Envs   string // comma-joined; "dev,prod"
-	Region string
-	State  string
-	Bucket string // app-config bucket name (for detail view)
+	Name      string
+	Envs      string // comma-joined; "dev,prod"
+	Region    string
+	State     string
+	Bucket    string // app-config bucket name
+	Instances string // comma-joined target instances discovered via tags
+	Endpoints string // comma-joined http://ip:port from status files
+	Status    string // rolled-up health per env (e.g. "dev: healthy (2/2)")
 }
 
 // store adapts lightsail.Client into a registry.Store. The client is built
@@ -104,13 +108,90 @@ func (s *store) StreamList(ctx context.Context, _ registry.Filter) <-chan regist
 			if len(appBuckets) == 0 {
 				continue
 			}
+			rows := aggregate(appBuckets)
+			// Enrich with per-env instances + status endpoints so the
+			// table + detail views show everything about the deployment,
+			// not just bucket metadata. Runs per-region to keep streaming
+			// responsive.
+			enrich(ctx, c.WithRegion(b.Region), rows)
 			select {
 			case <-ctx.Done():
 				return
-			case out <- registry.Batch{Items: aggregate(appBuckets)}:
+			case out <- registry.Batch{Items: rows}:
 			}
 		}
 	}()
+	return out
+}
+
+// enrich mutates each App row in rows with Instances (from ls:app:<name>:<env>
+// tags) and Endpoints + Status (from <instance>_status.json files in the
+// env buckets). Best-effort: any failure leaves fields blank.
+func enrich(ctx context.Context, c *lightsail.Client, rows []any) {
+	for i, it := range rows {
+		a := it.(App)
+		instances := map[string]struct{}{}
+		endpoints := []string{}
+		var statusParts []string
+		for _, env := range strings.Split(a.Envs, ",") {
+			if env == "" {
+				continue
+			}
+			targets, _ := c.FindTargetsForAppEnv(ctx, a.Name, env)
+			for _, t := range targets {
+				instances[t.Name] = struct{}{}
+			}
+			// Status from env bucket (best-effort; bucket may not exist yet).
+			if a.Bucket != "" {
+				// Env bucket name: a.Bucket is the app-config bucket
+				// (ls--acct--app); the env bucket is ls--acct--app--env.
+				envBucket := a.Bucket + "--" + env
+				statuses, err := c.ReadBucketStatuses(ctx, envBucket)
+				if err == nil {
+					healthy, total := 0, 0
+					for _, st := range statuses {
+						for _, ctr := range st.Containers {
+							total++
+							if ctr.Status == "running" {
+								healthy++
+							}
+						}
+						endpoints = append(endpoints, st.Endpoints...)
+					}
+					if total > 0 {
+						statusParts = append(statusParts, fmt.Sprintf("%s: %d/%d", env, healthy, total))
+					}
+				}
+			}
+		}
+		if len(instances) > 0 {
+			names := make([]string, 0, len(instances))
+			for n := range instances {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			a.Instances = strings.Join(names, ",")
+		}
+		if len(endpoints) > 0 {
+			a.Endpoints = strings.Join(dedupeStrings(endpoints), ",")
+		}
+		if len(statusParts) > 0 {
+			a.Status = strings.Join(statusParts, " · ")
+		}
+		rows[i] = a
+	}
+}
+
+func dedupeStrings(in []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
 	return out
 }
 
@@ -203,8 +284,14 @@ func Resource(region *string, regionHints []string) registry.Resource {
 			Table: registry.TableHint{Header: "REGION"}},
 		{Name: "State", Flag: "state", Help: "bucket state",
 			Table: registry.TableHint{Header: "STATE"}},
+		{Name: "Status", Flag: "status", Help: "rolled-up health",
+			Table: registry.TableHint{Header: "STATUS"}},
 		{Name: "Bucket", Flag: "bucket", Help: "app config bucket",
 			Table: registry.TableHint{Header: "BUCKET", Wide: true}},
+		{Name: "Instances", Flag: "instances", Help: "target instances",
+			Table: registry.TableHint{Header: "INSTANCES", Wide: true}},
+		{Name: "Endpoints", Flag: "endpoints", Help: "live endpoints",
+			Table: registry.TableHint{Header: "ENDPOINTS", Wide: true}},
 	}
 	st := &store{region: region, regionHints: regionHints}
 	suggest := registry.SuggestFrom(st, fields, "name")
