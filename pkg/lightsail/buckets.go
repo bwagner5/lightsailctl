@@ -140,11 +140,13 @@ func (c *Client) CreateBucket(ctx context.Context, name string) error {
 }
 
 // WaitForBucketReady polls GetBucket until its state.code == "OK" or a
-// 3-minute timeout elapses. Bucket creation is eventually-consistent in
-// Lightsail; in practice it takes ~15-60s to become usable.
+// 10-minute timeout elapses. Bucket creation is eventually-consistent in
+// Lightsail; observed propagation is usually 15-60s but can extend into
+// minutes on busy regions or for newly-enabled opt-in regions.
 func (c *Client) WaitForBucketReady(ctx context.Context, name string) error {
-	deadline := time.Now().Add(3 * time.Minute)
+	deadline := time.Now().Add(10 * time.Minute)
 	delay := 2 * time.Second
+	var lastState string
 	for {
 		out, err := c.ls.GetBuckets(ctx, &lightsail.GetBucketsInput{
 			BucketName: aws.String(name),
@@ -152,21 +154,22 @@ func (c *Client) WaitForBucketReady(ctx context.Context, name string) error {
 		if err == nil {
 			for _, b := range out.Buckets {
 				if b.Name != nil && *b.Name == name && b.State != nil {
-					if aws.ToString(b.State.Code) == "OK" {
+					lastState = aws.ToString(b.State.Code)
+					if lastState == "OK" {
 						return nil
 					}
 				}
 			}
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("bucket %q not ready after 3m", name)
+			return fmt.Errorf("bucket %q not ready after 10m (last state: %q)", name, lastState)
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(delay):
 		}
-		if delay < 10*time.Second {
+		if delay < 15*time.Second {
 			delay += 2 * time.Second
 		}
 	}

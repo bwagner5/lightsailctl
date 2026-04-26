@@ -49,13 +49,21 @@ var ErrBucketKeysExhausted = errors.New("both bucket access-key slots are in use
 // bucket via the new credentials. This is best-effort: if the bucket is too
 // new for the credentials to see (eventual consistency), we retry briefly.
 func (c *Client) CreateBucketKey(ctx context.Context, bucket string) (*BucketKey, error) {
-	out, err := c.ls.CreateBucketAccessKey(ctx, &lightsail.CreateBucketAccessKeyInput{
-		BucketName: aws.String(bucket),
+	var out *lightsail.CreateBucketAccessKeyOutput
+	err := RetryableLong(ctx, func(ctx context.Context) error {
+		var cerr error
+		out, cerr = c.ls.CreateBucketAccessKey(ctx, &lightsail.CreateBucketAccessKeyInput{
+			BucketName: aws.String(bucket),
+		})
+		if cerr == nil {
+			return nil
+		}
+		if isTooManyKeys(cerr) {
+			return StopRetry(ErrBucketKeysExhausted)
+		}
+		return cerr
 	})
 	if err != nil {
-		if isTooManyKeys(err) {
-			return nil, ErrBucketKeysExhausted
-		}
 		return nil, fmt.Errorf("create bucket access key: %w", err)
 	}
 	key := &BucketKey{

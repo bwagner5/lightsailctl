@@ -70,10 +70,12 @@ func (c *Client) SetBucketAccessForInstance(ctx context.Context, bucket, instanc
 	if allow {
 		access = lstypes.ResourceBucketAccessAllow
 	}
-	_, err := c.ls.SetResourceAccessForBucket(ctx, &lightsail.SetResourceAccessForBucketInput{
-		BucketName:   aws.String(bucket),
-		ResourceName: aws.String(instance),
-		Access:       access,
+	return RetryableLong(ctx, func(ctx context.Context) error {
+		_, err := c.ls.SetResourceAccessForBucket(ctx, &lightsail.SetResourceAccessForBucketInput{
+			BucketName:   aws.String(bucket),
+			ResourceName: aws.String(instance),
+			Access:       access,
+		})
+		return err
 	})
-	return err
 }

@@ -12,16 +12,32 @@ import (
 // for bucket/access-key reads after creates. fn should return nil on success,
 // a retryable error to retry, or StopRetry(err) to bail immediately.
 func Retryable(ctx context.Context, fn func(context.Context) error) error {
-	backoff := 200 * time.Millisecond
+	return retryFor(ctx, 5, 200*time.Millisecond, fn)
+}
+
+// RetryableLong is Retryable with a longer ceiling for operations on
+// freshly-created buckets (access keys, S3 writes) where server-side
+// propagation can take minutes. Caps at ~5 minutes total wall clock.
+func RetryableLong(ctx context.Context, fn func(context.Context) error) error {
+	return retryFor(ctx, 30, 2*time.Second, fn)
+}
+
+func retryFor(ctx context.Context, attempts int, initial time.Duration, fn func(context.Context) error) error {
+	backoff := initial
 	var lastErr error
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(backoff):
 			}
-			backoff *= 2
+			if backoff < 15*time.Second {
+				backoff *= 2
+				if backoff > 15*time.Second {
+					backoff = 15 * time.Second
+				}
+			}
 		}
 		err := fn(ctx)
 		if err == nil {
