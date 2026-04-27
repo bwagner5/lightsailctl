@@ -34,7 +34,6 @@ func deleteOp(s *store, suggest func(context.Context) ([]registry.Choice, error)
 			{Label: "Delete env buckets", Do: deleteEnvBucketsStep(s), Skip: skipIfNoEnvBuckets},
 			{Label: "Delete app-config bucket", Do: deleteAppConfigBucketStep(s), Skip: skipIfNoAppConfigBucket},
 			{Label: "Remove local lightsail.conf", Do: removeLocalConfStep, Skip: skipIfNoMatchingLocalConf},
-			{Label: "Forget optimistic cache entries", Do: forgetOptimisticStep(s)},
 		},
 	}
 }
@@ -162,23 +161,6 @@ func deleteAppConfigBucketStep(s *store) func(context.Context, *registry.State) 
 			return nil
 		}
 		return c.DeleteBucket(ctx, b.Name, b.Region)
-	}
-}
-
-func forgetOptimisticStep(s *store) func(context.Context, *registry.State) error {
-	return func(ctx context.Context, st *registry.State) error {
-		c, err := s.ensure(ctx)
-		if err != nil {
-			return nil //nolint:nilerr // cache purge is best-effort
-		}
-		envs, _ := st.Data["env_buckets"].([]lightsail.Bucket)
-		for _, b := range envs {
-			c.ForgetOptimistic(b.Name)
-		}
-		if b, _ := st.Data["app_config_bucket"].(*lightsail.Bucket); b != nil {
-			c.ForgetOptimistic(b.Name)
-		}
-		return nil
 	}
 }
 

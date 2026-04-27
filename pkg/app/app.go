@@ -109,11 +109,14 @@ func (s *store) StreamList(ctx context.Context, _ registry.Filter) <-chan regist
 				continue
 			}
 			rows := aggregate(appBuckets)
-			// Enrich with per-env instances + status endpoints so the
-			// table + detail views show everything about the deployment,
-			// not just bucket metadata. Runs per-region to keep streaming
-			// responsive.
-			enrich(ctx, c.WithRegion(b.Region), rows)
+			// Ship rows immediately. enrich used to run synchronously
+			// before publishing, adding per-app AWS calls
+			// (FindTargetsForAppEnv + ReadBucketStatuses) that could
+			// block the batch by 10+ seconds under load — which made a
+			// newly-created app invisible in the table until every
+			// other app's enrichment finished. Columns that depend on
+			// enrichment (Instances / Endpoints / Status) populate via
+			// the detail view / Get path instead.
 			select {
 			case <-ctx.Done():
 				return
@@ -239,13 +242,22 @@ func aggregate(buckets []lightsail.Bucket) []any {
 }
 
 func (s *store) Get(ctx context.Context, id string) (any, error) {
+	c, err := s.ensure(ctx)
+	if err != nil {
+		return nil, err
+	}
 	items, err := s.List(ctx, registry.Filter{})
 	if err != nil {
 		return nil, err
 	}
 	for _, it := range items {
 		if a := it.(App); a.Name == id {
-			return a, nil
+			// Enrich just this one row on demand — cheap enough for a
+			// single app and lets the detail view populate
+			// Instances / Endpoints / Status without blocking the list.
+			row := []any{a}
+			enrich(ctx, c.WithRegion(a.Region), row)
+			return row[0], nil
 		}
 	}
 	return nil, notFound(id)
