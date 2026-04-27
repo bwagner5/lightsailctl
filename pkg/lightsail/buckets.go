@@ -54,11 +54,15 @@ func (c *Client) ListBuckets(ctx context.Context) ([]Bucket, error) {
 		buckets = append(buckets, bkt)
 	}
 	if c.optimistic != nil {
-		// Only include optimistic entries that match this region.
+		// Include optimistic entries ONLY when they match THIS region
+		// exactly. An entry with an empty Region is ignored here — it
+		// would otherwise surface in every region's ListBuckets and
+		// produce N-way duplicates in the TUI (one row per region) as
+		// each regional batch appends the same optimistic entry.
 		merged := c.optimistic.merge(buckets)
 		buckets = merged[:0:len(merged)]
 		for _, b := range merged {
-			if b.Region == "" || b.Region == c.cfg.Region {
+			if b.Region == c.cfg.Region {
 				buckets = append(buckets, b)
 			}
 		}

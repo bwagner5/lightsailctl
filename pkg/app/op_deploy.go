@@ -229,9 +229,17 @@ func ensureAppStep(s *store) func(context.Context, *registry.State) error {
 			st.Data["needs-create"] = false
 			return nil
 		}
-		pinRegion(s, st.Input.Get("region"))
+		region := st.Input.Get("region")
+		pinRegion(s, region)
 		st.Data["needs-create"] = true
 		st.Data["bucket"] = envBucket
+		// Re-announce now that we know the region, so the TUI's
+		// regional ListBuckets merge (which strictly matches region)
+		// picks up the entry. The earlier announceEarlyStep may have
+		// fired with an empty region when the conf was bare.
+		appBucket := lightsail.AppBucketName(acct, st.Input.Get("name"))
+		c.AnnounceBucket(envBucket, region)
+		c.AnnounceBucket(appBucket, region)
 		return nil
 	}
 }
