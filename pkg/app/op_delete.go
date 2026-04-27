@@ -47,8 +47,12 @@ func discoverTargetsStep(s *store) func(context.Context, *registry.State) error 
 		if err != nil {
 			return err
 		}
+		// Best-effort: a total failure here (e.g. one region errors)
+		// shouldn't block delete. Missing-instance / not-found cases
+		// are already absorbed by FindTargetsForApp returning an empty
+		// list from that region.
 		refs, err := c.FindTargetsForApp(ctx, st.Input.Get("name"))
-		if err != nil {
+		if err != nil && !lightsail.IsNotFound(err) {
 			return err
 		}
 		st.Data["targets"] = refs
@@ -67,8 +71,13 @@ func untagTargetsStep(s *store) func(context.Context, *registry.State) error {
 		if err != nil {
 			return err
 		}
-		_, err = c.UntagInstancesForApp(ctx, st.Input.Get("name"))
-		return err
+		// Tolerate already-gone: if an instance vanished between
+		// Discover and Untag, or never existed, that's success for
+		// delete purposes.
+		if _, err := c.UntagInstancesForApp(ctx, st.Input.Get("name")); err != nil && !lightsail.IsNotFound(err) {
+			return err
+		}
+		return nil
 	}
 }
 
@@ -101,7 +110,7 @@ func listBucketsForDeleteStep(s *store) func(context.Context, *registry.State) e
 			return err
 		}
 		all, err := c.ListAppBuckets(ctx)
-		if err != nil {
+		if err != nil && !lightsail.IsNotFound(err) {
 			return err
 		}
 		name := st.Input.Get("name")
@@ -142,7 +151,9 @@ func deleteEnvBucketsStep(s *store) func(context.Context, *registry.State) error
 		bs, _ := st.Data["env_buckets"].([]lightsail.Bucket)
 		var firstErr error
 		for _, b := range bs {
-			if err := c.DeleteBucket(ctx, b.Name, b.Region); err != nil && firstErr == nil {
+			// Not-found = someone (maybe a previous partial delete)
+			// already cleaned this up. That's fine.
+			if err := c.DeleteBucket(ctx, b.Name, b.Region); err != nil && !lightsail.IsNotFound(err) && firstErr == nil {
 				firstErr = fmt.Errorf("delete %s: %w", b.Name, err)
 			}
 		}
@@ -160,7 +171,10 @@ func deleteAppConfigBucketStep(s *store) func(context.Context, *registry.State) 
 		if b == nil {
 			return nil
 		}
-		return c.DeleteBucket(ctx, b.Name, b.Region)
+		if err := c.DeleteBucket(ctx, b.Name, b.Region); err != nil && !lightsail.IsNotFound(err) {
+			return err
+		}
+		return nil
 	}
 }
 

@@ -277,3 +277,25 @@ func isAlreadyExists(err error) bool {
 	}
 	return false
 }
+
+// IsNotFound reports whether err looks like a Lightsail "doesn't exist"
+// response. Used by delete paths to treat already-gone resources as
+// success — partial or retried deletes shouldn't fail because something
+// a previous run already removed.
+func IsNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"does not exist",
+		"notfound",
+		"not found",
+		"no such",
+	} {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
+}
