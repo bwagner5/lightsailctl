@@ -8,27 +8,21 @@
 //
 // Prereqs:
 //   - AWS credentials in the usual SDK locations (profile, env, etc.)
-//   - An existing Lightsail instance with docker already installed
-//     (blueprint: any Ubuntu+Docker AMI; port 22 open to your IP)
-//   - A linux/amd64 lightsailctl binary to scp to the instance
 //
-// Required env vars:
-//   LS_INTEG_INSTANCE     — name of the pre-existing Lightsail instance
-//   LS_INTEG_REGION       — AWS region the instance lives in
-//   LS_INTEG_AGENT_PATH   — local path to a linux/amd64 lightsailctl binary
+// Optional env vars:
 //
-// Optional:
-//   LS_INTEG_KEEP         — "1" to skip teardown (leaves buckets+tags behind)
+//	LS_INTEG_REGION       — AWS region the instance lives in
+//	LS_INTEG_AGENT_PATH   — local path to a linux/amd64 lightsailctl binary
+//	LS_INTEG_INSTANCE     — name of the pre-existing Lightsail instance
+//	LS_INTEG_KEEP         — "1" to skip teardown (leaves buckets+tags behind)
 //
 // Run:
-//   make -C ../../ build   # first: build a linux binary for the agent
-//   GOOS=linux GOARCH=amd64 go build -o /tmp/lightsailctl-linux .
-//   LS_INTEG_INSTANCE=my-inst LS_INTEG_REGION=us-east-2 \
-//     LS_INTEG_AGENT_PATH=/tmp/lightsailctl-linux \
-//     go test -tags=integ -v -timeout=20m ./test/integ/...
+//
+//	make integ
 //
 // Target just one phase after a successful first run:
-//   go test -tags=integ -v -run TestEndToEnd/Deploy ./test/integ/...
+//
+//	go test -tags=integ -v -run TestEndToEnd/Deploy ./test/integ/...
 package integ
 
 import (
@@ -93,23 +87,6 @@ func load(t *testing.T) *config {
 	return cfg
 }
 
-// buildCLI builds the lightsailctl binary for the test host and returns its
-// path. Built once and reused across subtests via t.Cleanup.
-func buildCLI(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "lightsailctl")
-	root := repoRoot(t)
-	cmd := exec.Command("go", "build", "-o", bin, ".")
-	cmd.Dir = root
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("go build: %v", err)
-	}
-	return bin
-}
-
 // repoRoot returns the lightsailctl repo root (two up from this file).
 func repoRoot(t *testing.T) string {
 	t.Helper()
@@ -139,7 +116,9 @@ func runCLI(t *testing.T, cfg *config, workdir string, args ...string) string {
 
 // TestEndToEnd runs the full create->deploy->status->curl->delete cycle.
 // Each phase is its own t.Run so a single phase can be re-executed with
-//   go test -tags=integ -run TestEndToEnd/Deploy ./test/integ/...
+//
+//	go test -tags=integ -run TestEndToEnd/Deploy ./test/integ/...
+//
 // after an earlier run left the app in a deployable state.
 func TestEndToEnd(t *testing.T) {
 	cfg := load(t)
@@ -193,8 +172,8 @@ func TestEndToEnd(t *testing.T) {
 			Envs []struct {
 				Env      string `json:"env"`
 				Statuses []struct {
-					Instance   string `json:"instance"`
-					Status     string `json:"status"`
+					Instance   string   `json:"instance"`
+					Status     string   `json:"status"`
 					Endpoints  []string `json:"endpoints"`
 					Containers []struct {
 						Name   string `json:"name"`

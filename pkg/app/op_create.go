@@ -40,7 +40,8 @@ func createOp(s *store) registry.Operation {
 				Required: true, Suggest: instanceSuggest(s)},
 			{Flag: "agent-path", Help: "lightsailctl binary to scp to the instance (linux/amd64)",
 				Required: true, File: true},
-			{Flag: "region", Help: "AWS region (auto-filled from --instance)"},
+			{Flag: "region", Help: "AWS region (auto-filled from --instance)",
+				Wizard: registry.BoolPtr(false)},
 		},
 		Steps: []registry.Step{
 			{Label: "Resolve region from instance", Do: resolveRegionStep(s)},

@@ -38,30 +38,24 @@ func deployOp(s *store) registry.Operation {
 			{Flag: "instance", Help: "target Lightsail instance (region inferred from it)", Required: true, Suggest: instanceSuggest(s)},
 			{Flag: "agent-path", Help: "lightsailctl binary to scp to the instance (linux/amd64)",
 				Required: true, File: true},
-			{Flag: "region", Help: "AWS region (auto-filled from --instance)"},
-			{Flag: "wait-timeout", Help: "how long to wait for healthy (0 with --no-wait)", Default: "3m"},
-			{Flag: "no-wait", Help: "upload and exit without waiting for health", Default: "false"},
+			{Flag: "region", Help: "AWS region (auto-filled from --instance)",
+				Wizard: registry.BoolPtr(false)},
+			{Flag: "wait-timeout", Help: "how long to wait for healthy", Default: "3m",
+				Wizard: registry.BoolPtr(false)},
+			{Flag: "no-wait", Help: "upload and exit without waiting for health", Default: "false",
+				Wizard: registry.BoolPtr(false)},
 		},
 		Pre: preloadFromConf,
 		Steps: []registry.Step{
-			// First thing: publish an optimistic entry to the shared
-			// cache based on conf + wizard input, so the app row shows
-			// up in the table immediately. acct isn't known yet, so
-			// this uses a placeholder bucket name — enough to produce
-			// a row via aggregate(). The row is replaced with the real
-			// row once the saga progresses and AWS list returns.
-			{Label: "Add app to table", Do: announceEarlyStep(s)},
-			// First visible step reflects the conf state to the user.
-			// detectConfStep is invisible housekeeping that records
-			// conf_existed + conf_complete in st.Data; the two
-			// user-facing rows below pick which to render.
-			{Label: "Inspect lightsail.conf", Do: detectConfStep},
+			{Label: "Inspect lightsail.conf", Do: func(ctx context.Context, st *registry.State) error {
+				// Announce app to table (housekeeping).
+				_ = announceEarlyStep(s)(ctx, st)
+				// Detect conf.
+				return detectConfStep(ctx, st)
+			}},
 			{Label: "Resolve region from instance", Do: resolveRegionFromInstanceStep(s), Skip: skipIfRegionSet, Undo: unpinStoreStep(s)},
 			{Label: "Create lightsail.conf", Do: saveConfigStep, Skip: skipIfConfDetected},
-			{Label: "Detected lightsail.conf", Do: noopStep, Skip: skipIfConfNotDetected},
 			{Label: "Check app exists (create if missing)", Do: ensureAppStep(s), Undo: unpinStoreStep(s)},
-			// Create sub-steps run only when ensureAppStep decided we
-			// need to. Skipped on subsequent deploys to an existing app.
 			{Label: "Verify agent binary", Do: verifyAgentStep, Skip: skipIfAppExists},
 			{Label: "Create app-config bucket", Do: createAppBucketStep(s), Skip: skipIfAppExists},
 			{Label: "Create env bucket", Do: createEnvBucketStep(s), Skip: skipIfAppExists},
@@ -71,17 +65,37 @@ func deployOp(s *store) registry.Operation {
 			{Label: "Install agent on instance", Do: remoteInstallStep(s), Skip: skipIfAppExists},
 			{Label: "Start agent on instance", Do: remoteUpStep(s), Skip: skipIfAppExists},
 			{Label: "Package source", Do: packageStep, Undo: packageUndo},
-			{Label: "Acquire bucket key + S3 client", Do: acquireKeyStep(s), Undo: acquireKeyUndo},
+			{Label: "Acquire bucket key", Do: acquireKeyStep(s), Undo: acquireKeyUndo},
 			{Label: "Upload deploy asset", Do: uploadStep},
-			{Label: "Open firewall ports from compose", Do: firewallStep(s)},
+			{Label: "Open firewall ports", Do: firewallStep(s)},
 			{Label: "Release bucket key", Do: releaseKeyStep},
-			{Label: "Wait for healthy", Do: waitStep(s), Skip: skipIfNoWait},
-			// Unpin the store so the next TUI refresh fans out across
-			// ALL regions again rather than staying pinned to whichever
-			// region this deploy touched. Without this, the app list
-			// post-deploy is limited to the single-region view and
-			// other-region apps vanish from the table.
-			{Label: "Restore global view", Do: unpinStoreStep(s)},
+			{Label: "Wait for healthy", Do: func(ctx context.Context, st *registry.State) error {
+				err := waitStep(s)(ctx, st)
+				// Collect endpoints for the completion summary.
+				if c, cerr := s.ensure(ctx); cerr == nil {
+					if bucket, ok := st.Data["bucket"].(string); ok {
+						if statuses, serr := c.ReadBucketStatuses(ctx, bucket); serr == nil {
+							var eps []string
+							for _, status := range statuses {
+								eps = append(eps, status.Endpoints...)
+							}
+							if len(eps) > 0 {
+								st.Output = "Endpoints:\n"
+								for _, ep := range eps {
+									st.Output += "  " + ep + "\n"
+								}
+							}
+						}
+					}
+				}
+				// Restore global view (housekeeping).
+				_ = unpinStoreStep(s)(ctx, st)
+				return err
+			}, Skip: skipIfNoWait},
+			// If no-wait, still restore global view.
+			{Label: "Finalize", Do: unpinStoreStep(s), Skip: func(st *registry.State) bool {
+				return st.Input.Get("no-wait") != "true"
+			}},
 		},
 	}
 }
@@ -223,7 +237,7 @@ func ensureAppStep(s *store) func(context.Context, *registry.State) error {
 			st.Data["ignore"] = cfg.Ignore
 		}
 		envBucket := lightsail.EnvBucketName(acct, st.Input.Get("name"), st.Input.Get("env"))
-		if b := findBucket(ctx, c, envBucket); b != nil {
+		if b := findBucket(ctx, c, st.Input.Get("region"), envBucket); b != nil {
 			st.Data["bucket"] = envBucket
 			pinRegion(s, b.Region)
 			st.Data["needs-create"] = false
@@ -302,17 +316,25 @@ func regionOfInstance(ctx context.Context, c *lightsail.Client, name string) (st
 	return "", fmt.Errorf("instance %q not found", name)
 }
 
-func findBucket(ctx context.Context, c *lightsail.Client, name string) *lightsail.Bucket {
-	buckets, err := c.ListAppBuckets(ctx)
+// findBucket authoritatively checks whether the env bucket exists. Uses
+// the direct GetBuckets API (via Client.GetBucket) instead of the
+// optimistic-cache-augmented list, so a PENDING entry the saga just
+// announced doesn't make us skip the create sub-steps for a bucket
+// that was never actually provisioned.
+//
+// region is the caller's best guess for where the bucket would live
+// (usually the deploy target's region). GetBucket requires a
+// region-pinned client; we build one locally rather than mutating the
+// shared store's pin state, which is the responsibility of pinRegion.
+func findBucket(ctx context.Context, c *lightsail.Client, region, name string) *lightsail.Bucket {
+	if region == "" {
+		return nil
+	}
+	b, err := c.WithRegion(region).GetBucket(ctx, name)
 	if err != nil {
 		return nil
 	}
-	for i := range buckets {
-		if buckets[i].Name == name {
-			return &buckets[i]
-		}
-	}
-	return nil
+	return b
 }
 
 // pinRegion makes the store's client region-specific. Temporary: callers

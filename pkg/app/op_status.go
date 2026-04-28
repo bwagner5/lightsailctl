@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/bwagner5/triad/pkg/registry"
 
@@ -21,8 +22,16 @@ func statusOp(s *store, suggest func(context.Context) ([]registry.Choice, error)
 		Name: "status", Key: "s", Short: "show app/env health",
 		Fields: []registry.Field{
 			{Flag: "name", Short: "n", Help: "app name", Required: true, Suggest: suggest},
-			{Flag: "env", Short: "e", Help: "environment (blank = all envs)"},
-			{Flag: "format", Short: "f", Help: "short | wide | json", Default: "short"},
+			{Flag: "env", Short: "e", Help: "environment (blank = all envs)",
+				Suggest: envSuggest(s)},
+			{Flag: "format", Short: "f", Help: "output format", Default: "short",
+				Suggest: func(_ context.Context) ([]registry.Choice, error) {
+					return []registry.Choice{
+						{Value: "short", Display: "short  Summary per environment"},
+						{Value: "wide", Display: "wide   Container-level detail"},
+						{Value: "json", Display: "json   Raw JSON"},
+					}, nil
+				}},
 		},
 		Run: func(ctx context.Context, in registry.Input) error {
 			c, err := s.ensure(ctx)
@@ -154,31 +163,47 @@ func renderShort(w io.Writer, rep Report) error {
 }
 
 func renderWide(w io.Writer, rep Report) error {
-	fw := &errWriter{w: w}
-	fw.printf("ENV\tINSTANCE\tCONTAINER\tSTATUS\n")
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fw := &errWriter{w: tw}
+	fw.printf("ENV\tINSTANCE\tCONTAINER\tSTATUS\tENDPOINT\tDEPLOYED\n")
 	for _, er := range rep.Envs {
 		if er.Error != "" {
-			fw.printf("%s\t-\t-\terror: %s\n", er.Env, er.Error)
+			fw.printf("%s\t-\t-\terror: %s\t\t\n", er.Env, er.Error)
 			continue
 		}
 		if len(er.Statuses) == 0 {
-			fw.printf("%s\t-\t-\tno status yet\n", er.Env)
+			fw.printf("%s\t-\t-\tno status yet\t\t\n", er.Env)
 			continue
 		}
 		for _, s := range er.Statuses {
+			deployed := ""
+			if s.LastDeploy != nil && !s.LastDeploy.Timestamp.IsZero() {
+				deployed = s.LastDeploy.Timestamp.Format("2006-01-02 15:04")
+			}
 			if len(s.Containers) == 0 {
-				fw.printf("%s\t%s\t-\t%s\n", er.Env, s.Instance, s.Status)
+				ep := ""
+				if len(s.Endpoints) > 0 {
+					ep = strings.Join(s.Endpoints, ", ")
+				}
+				fw.printf("%s\t%s\t-\t%s\t%s\t%s\n", er.Env, s.Instance, s.Status, ep, deployed)
 				continue
 			}
-			for _, c := range s.Containers {
-				fw.printf("%s\t%s\t%s\t%s\n", er.Env, s.Instance, c.Name, c.Status)
+			for i, c := range s.Containers {
+				ep := ""
+				if i < len(s.Endpoints) {
+					ep = s.Endpoints[i]
+				}
+				fw.printf("%s\t%s\t%s\t%s\t%s\t%s\n", er.Env, s.Instance, c.Name, c.Status, ep, deployed)
 			}
-			for _, ep := range s.Endpoints {
-				fw.printf("%s\t%s\t(endpoint)\t%s\n", er.Env, s.Instance, ep)
+			for i := len(s.Containers); i < len(s.Endpoints); i++ {
+				fw.printf("%s\t%s\t\t\t%s\t\n", er.Env, s.Instance, s.Endpoints[i])
 			}
 		}
 	}
-	return fw.err
+	if fw.err != nil {
+		return fw.err
+	}
+	return tw.Flush()
 }
 
 // errWriter captures the first write error so callers don't have to thread
@@ -193,4 +218,27 @@ func (e *errWriter) printf(format string, a ...any) {
 		return
 	}
 	_, e.err = fmt.Fprintf(e.w, format, a...)
+}
+
+// envSuggest returns a Suggest func that lists known environments.
+func envSuggest(s *store) func(context.Context) ([]registry.Choice, error) {
+	return func(ctx context.Context) ([]registry.Choice, error) {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return nil, err
+		}
+		buckets, err := c.ListAppBuckets(ctx)
+		if err != nil {
+			return nil, err
+		}
+		seen := map[string]bool{}
+		var out []registry.Choice
+		for _, b := range buckets {
+			if _, env := lightsail.ParseAppEnv(b.Name); env != "" && !seen[env] {
+				seen[env] = true
+				out = append(out, registry.Choice{Value: env})
+			}
+		}
+		return out, nil
+	}
 }

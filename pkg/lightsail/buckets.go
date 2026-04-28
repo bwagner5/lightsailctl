@@ -15,9 +15,10 @@ import (
 
 // Bucket is our slim view of a Lightsail bucket.
 type Bucket struct {
-	Name   string
-	State  string
-	Region string
+	Name      string
+	State     string
+	Region    string
+	CreatedAt time.Time
 }
 
 // ListBuckets returns every Lightsail bucket visible to the caller.
@@ -50,6 +51,9 @@ func (c *Client) ListBuckets(ctx context.Context) ([]Bucket, error) {
 		}
 		if b.Location != nil {
 			bkt.Region = string(b.Location.RegionName)
+		}
+		if b.CreatedAt != nil {
+			bkt.CreatedAt = *b.CreatedAt
 		}
 		buckets = append(buckets, bkt)
 	}
@@ -153,6 +157,44 @@ func (c *Client) ListAppBuckets(ctx context.Context) ([]Bucket, error) {
 		}
 	}
 	return out, nil
+}
+
+// GetBucket looks up a single bucket by name via the live Lightsail API
+// (GetBuckets with a BucketName filter). It deliberately bypasses the
+// optimistic cache so callers that need authoritative "does this bucket
+// actually exist?" answers (e.g. deploy's create-if-missing gate) are
+// not fooled by a PENDING entry this process just announced.
+//
+// Returns (nil, nil) when the bucket does not exist. The client must be
+// pinned to a region for this call; use a region-pinned sub-client
+// (c.WithRegion) when the caller knows the region.
+func (c *Client) GetBucket(ctx context.Context, name string) (*Bucket, error) {
+	out, err := c.ls.GetBuckets(ctx, &lightsail.GetBucketsInput{
+		BucketName: aws.String(name),
+	})
+	if err != nil {
+		if IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	for _, b := range out.Buckets {
+		if aws.ToString(b.Name) != name {
+			continue
+		}
+		bkt := Bucket{Name: aws.ToString(b.Name)}
+		if b.State != nil {
+			bkt.State = aws.ToString(b.State.Code)
+		}
+		if b.Location != nil {
+			bkt.Region = string(b.Location.RegionName)
+		}
+		if b.CreatedAt != nil {
+			bkt.CreatedAt = *b.CreatedAt
+		}
+		return &bkt, nil
+	}
+	return nil, nil
 }
 
 // CreateBucket creates a Lightsail bucket with the small bundle, then

@@ -52,7 +52,7 @@ func TestRenderWide(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	for _, want := range []string{"ls-inst-1\tweb\trunning", "ls-inst-1\tdb\trunning", "http://1.2.3.4:80"} {
+	for _, want := range []string{"ls-inst-1", "web", "running", "db", "http://1.2.3.4:80"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("wide missing %q:\n%s", want, out)
 		}

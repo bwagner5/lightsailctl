@@ -20,7 +20,8 @@ func logsOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) 
 		Name: "logs", Key: "l", Short: "tail docker compose logs on a target",
 		Fields: []registry.Field{
 			{Flag: "name", Short: "n", Help: "app name", Required: true, Suggest: suggest},
-			{Flag: "env", Short: "e", Help: "environment", Default: "dev"},
+			{Flag: "env", Short: "e", Help: "environment", Default: "dev",
+				Suggest: envSuggest(s)},
 		},
 		Run: func(ctx context.Context, in registry.Input) error {
 			c, err := s.ensure(ctx)

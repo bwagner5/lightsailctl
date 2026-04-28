@@ -2,7 +2,9 @@ package lightsail
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/lightsail"
@@ -11,12 +13,15 @@ import (
 
 // Instance is our slim view of a Lightsail instance.
 type Instance struct {
-	Name   string
-	State  string
-	IP     string
-	Region string
-	Tags   map[string]string
-	raw    *lstypes.Instance
+	Name      string
+	State     string
+	IP        string
+	Region    string
+	Blueprint string
+	Bundle    string
+	CreatedAt time.Time
+	Tags      map[string]string
+	raw       *lstypes.Instance
 }
 
 // ListInstances returns every Lightsail instance visible to the caller.
@@ -71,8 +76,21 @@ func (c *Client) listInstancesGlobal(ctx context.Context) ([]Instance, error) {
 	return out, nil
 }
 
-// GetInstance fetches a single instance by name.
+// GetInstance fetches a single instance by name. When the client is global
+// (no region pinned), it fans out via ListInstances to find the instance.
 func (c *Client) GetInstance(ctx context.Context, name string) (*Instance, error) {
+	if c.Region() == "" {
+		instances, err := c.ListInstances(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for i := range instances {
+			if instances[i].Name == name {
+				return &instances[i], nil
+			}
+		}
+		return nil, fmt.Errorf("instance %q not found", name)
+	}
 	resp, err := c.ls.GetInstance(ctx, &lightsail.GetInstanceInput{InstanceName: aws.String(name)})
 	if err != nil {
 		return nil, err
@@ -95,13 +113,18 @@ func (c *Client) TagInstance(ctx context.Context, instance, key, value string) e
 
 func toInstance(in *lstypes.Instance) Instance {
 	out := Instance{
-		Name: aws.ToString(in.Name),
-		IP:   aws.ToString(in.PublicIpAddress),
-		Tags: map[string]string{},
-		raw:  in,
+		Name:      aws.ToString(in.Name),
+		IP:        aws.ToString(in.PublicIpAddress),
+		Blueprint: aws.ToString(in.BlueprintId),
+		Bundle:    aws.ToString(in.BundleId),
+		Tags:      map[string]string{},
+		raw:       in,
 	}
 	if in.State != nil {
 		out.State = aws.ToString(in.State.Name)
+	}
+	if in.CreatedAt != nil {
+		out.CreatedAt = *in.CreatedAt
 	}
 	if in.Location != nil {
 		out.Region = string(in.Location.RegionName)

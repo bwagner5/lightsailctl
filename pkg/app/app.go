@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/bwagner5/triad/pkg/registry"
 
@@ -23,6 +24,7 @@ type App struct {
 	Envs      string // comma-joined; "dev,prod"
 	Region    string
 	State     string
+	Age       string
 	Bucket    string // app-config bucket name
 	Instances string // comma-joined target instances discovered via tags
 	Endpoints string // comma-joined http://ip:port from status files
@@ -201,6 +203,7 @@ func dedupeStrings(in []string) []string {
 // aggregate rolls a flat list of app-prefixed buckets into App rows.
 func aggregate(buckets []lightsail.Bucket) []any {
 	byName := map[string]*App{}
+	created := map[string]time.Time{} // earliest bucket CreatedAt per app
 	for _, b := range buckets {
 		// env bucket
 		if app, env := lightsail.ParseAppEnv(b.Name); app != "" {
@@ -217,6 +220,9 @@ func aggregate(buckets []lightsail.Bucket) []any {
 			if a.State == "" || b.State != "OK" {
 				a.State = b.State
 			}
+			if !b.CreatedAt.IsZero() && (created[app].IsZero() || b.CreatedAt.Before(created[app])) {
+				created[app] = b.CreatedAt
+			}
 			continue
 		}
 		// app-config bucket
@@ -230,11 +236,17 @@ func aggregate(buckets []lightsail.Bucket) []any {
 			if a.State == "" {
 				a.State = b.State
 			}
+			if !b.CreatedAt.IsZero() && (created[app].IsZero() || b.CreatedAt.Before(created[app])) {
+				created[app] = b.CreatedAt
+			}
 		}
 	}
 	out := make([]any, 0, len(byName))
 	for _, a := range byName {
 		a.Envs = sortedCSV(a.Envs)
+		if t, ok := created[a.Name]; ok && !t.IsZero() {
+			a.Age = t.Format(time.RFC3339)
+		}
 		out = append(out, *a)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].(App).Name < out[j].(App).Name })
@@ -296,6 +308,8 @@ func Resource(region *string, regionHints []string) registry.Resource {
 			Table: registry.TableHint{Header: "REGION"}},
 		{Name: "State", Flag: "state", Help: "bucket state",
 			Table: registry.TableHint{Header: "STATE"}},
+		{Name: "Age", Flag: "age", Help: "created",
+			Table: registry.TableHint{Header: "AGE", Tick: true}},
 		{Name: "Status", Flag: "status", Help: "rolled-up health",
 			Table: registry.TableHint{Header: "STATUS"}},
 		{Name: "Bucket", Flag: "bucket", Help: "app config bucket",

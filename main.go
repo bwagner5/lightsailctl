@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/aws/lightsailctl/internal"
 	"github.com/aws/lightsailctl/internal/plugin"
 	"github.com/aws/lightsailctl/pkg/app"
+	"github.com/aws/lightsailctl/pkg/instance"
 )
 
 const cliName = "lightsailctl"
@@ -62,6 +64,7 @@ func Run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	g := &cli.Globals{Getenv: getenv}
 	reg := registry.New()
 	reg.Register(app.Resource(&region, regionHints))
+	reg.Register(instance.Resource(&region, regionHints))
 
 	root := cli.Build(cliName, "Amazon Lightsail CLI", reg, g)
 	root.SetOut(stdout)
@@ -102,7 +105,15 @@ func Run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		RunE:    runTUI,
 	})
 
-	return root.ExecuteContext(ctx)
+	err := root.ExecuteContext(ctx)
+	if err != nil {
+		// Cobra's SilenceErrors is on, so commands that return plain
+		// errors (e.g. List failures) never get printed. The saga
+		// renderer prints its own errors inline, but we still need a
+		// fallback for everything else.
+		fmt.Fprintln(stderr, err)
+	}
+	return err
 }
 
 // dedupeNonEmpty returns a deduplicated slice of the non-empty inputs,
