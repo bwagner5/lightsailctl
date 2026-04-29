@@ -24,12 +24,18 @@ type Client struct {
 	// returns them immediately even when Lightsail is still propagating
 	// the create. Shared across WithRegion copies via pointer.
 	optimistic *optimisticCache
+	// regions memoizes the result of GetRegions for this process. Shared
+	// across WithRegion copies so the picker, fan-out, and regional
+	// sub-clients all hit the same in-memory list. The underlying disk
+	// cache is process-shared; this field avoids redoing the disk read
+	// per call.
+	regions *regionsCache
 }
 
 // Options configures Client construction.
 type Options struct {
 	// Region pins the Client to a single AWS region. Empty = global
-	// (fan-out across SupportedRegions() for list ops).
+	// (fan-out across the live Lightsail region list for list ops).
 	Region string
 	// RegionHints are AWS regions the caller wants queried first during
 	// global fan-out (typically AWS_REGION / AWS_DEFAULT_REGION, resolved
@@ -91,7 +97,7 @@ func (c *Client) Region() string { return c.cfg.Region }
 func (c *Client) WithRegion(region string) *Client {
 	cfg := c.cfg.Copy()
 	cfg.Region = region
-	out := &Client{cfg: cfg, sts: sts.NewFromConfig(cfg), regionHints: c.regionHints, optimistic: c.optimistic}
+	out := &Client{cfg: cfg, sts: sts.NewFromConfig(cfg), regionHints: c.regionHints, optimistic: c.optimistic, regions: c.regions}
 	if region != "" {
 		out.ls = lightsail.NewFromConfig(cfg)
 	}
@@ -178,50 +184,6 @@ func (c *Client) regional(r string) *Client {
 		return c
 	}
 	return c.WithRegion(r)
-}
-
-// FetchRegions returns the AWS regions where Lightsail is available,
-// ordered so that regions in the Client's RegionHints (set from main via
-// Options.RegionHints) come first. The list is a static allowlist from
-// the Lightsail docs (see SupportedRegions); it does NOT round-trip to
-// AWS. This matches the plan's "always global across Lightsail-supported
-// regions" UX and keeps cold-start latency flat.
-//
-// --region <id> on the CLI is validated against nothing; that allows
-// customers to use a newly launched Lightsail region before we ship an
-// updated allowlist.
-func (c *Client) FetchRegions(_ context.Context) ([]string, error) {
-	return prioritizeRegions(SupportedRegions(), c.regionHints), nil
-}
-
-// prioritizeRegions moves each region in hints (that exists in all) to the
-// front, preserving the order of hints. Others follow in all's original order.
-func prioritizeRegions(all, hints []string) []string {
-	if len(hints) == 0 {
-		return all
-	}
-	inHints := map[string]bool{}
-	for _, h := range hints {
-		inHints[h] = true
-	}
-	out := make([]string, 0, len(all))
-	// Hints first (only those that actually appear in all).
-	present := map[string]bool{}
-	for _, r := range all {
-		present[r] = true
-	}
-	for _, h := range hints {
-		if present[h] {
-			out = append(out, h)
-		}
-	}
-	// Then everything else, original order.
-	for _, r := range all {
-		if !inHints[r] {
-			out = append(out, r)
-		}
-	}
-	return out
 }
 
 // fanOut runs fn concurrently across each region and collects results.

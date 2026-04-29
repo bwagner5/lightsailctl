@@ -102,7 +102,7 @@ func (c *Client) StreamBuckets(ctx context.Context) <-chan BucketBatch {
 	}
 	go func() {
 		defer close(out)
-		regions, err := c.FetchRegions(ctx)
+		regions, err := c.RegionIDs(ctx)
 		if err != nil {
 			out <- BucketBatch{Err: err}
 			return

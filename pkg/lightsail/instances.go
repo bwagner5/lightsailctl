@@ -49,7 +49,7 @@ func (c *Client) ListInstances(ctx context.Context) ([]Instance, error) {
 }
 
 func (c *Client) listInstancesGlobal(ctx context.Context) ([]Instance, error) {
-	regions, err := c.FetchRegions(ctx)
+	regions, err := c.RegionIDs(ctx)
 	if err != nil {
 		return nil, err
 	}

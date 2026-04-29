@@ -38,7 +38,7 @@ func CreateFields(s *Store) []registry.Field {
 		{Flag: "name", Short: "n", Help: "instance name", Required: true,
 			Prefill: names.Random, Validate: names.ValidateLabel},
 		{Flag: "region", Short: "r", Help: "AWS region", Required: true,
-			Default: "us-east-1", Suggest: regionSuggest()},
+			Default: "us-east-1", Suggest: regionSuggest(s)},
 		{Flag: "blueprint-type", Help: "blueprint category", Default: "os",
 			Suggest: func(_ context.Context) ([]registry.Choice, error) {
 				return []registry.Choice{
@@ -79,23 +79,34 @@ func CreateStep(s *Store) registry.Step {
 	return registry.Step{Label: "Create instance", Do: createInstanceStep(s)}
 }
 
-func regionSuggest() func(context.Context) ([]registry.Choice, error) {
-	return func(_ context.Context) ([]registry.Choice, error) {
-		regions := lightsail.SortRegionsByGroup(lightsail.SupportedRegions())
+// regionSuggest builds the region picker's Suggest callback. Fetches
+// the live region list via Client.Regions (disk-cached; snapshot
+// fallback if offline), sorts and column-aligns it into triad.Choices
+// matching the old output layout.
+func regionSuggest(s *Store) func(context.Context) ([]registry.Choice, error) {
+	return func(ctx context.Context) ([]registry.Choice, error) {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return nil, err
+		}
+		regs, err := c.Regions(ctx)
+		if err != nil {
+			return nil, err
+		}
 		maxID, maxGroup := 0, 0
-		for _, r := range regions {
-			if len(r) > maxID {
-				maxID = len(r)
+		for _, r := range regs {
+			if len(r.ID) > maxID {
+				maxID = len(r.ID)
 			}
-			if g := lightsail.RegionGroup(r); len(g) > maxGroup {
+			if g := c.RegionGroup(ctx, r.ID); len(g) > maxGroup {
 				maxGroup = len(g)
 			}
 		}
-		out := make([]registry.Choice, 0, len(regions))
-		for _, r := range regions {
+		out := make([]registry.Choice, 0, len(regs))
+		for _, r := range regs {
 			out = append(out, registry.Choice{
-				Value:   r,
-				Display: fmt.Sprintf("%-*s  %-*s  %s", maxGroup, lightsail.RegionGroup(r), maxID, r, lightsail.RegionLocation(r)),
+				Value:   r.ID,
+				Display: fmt.Sprintf("%-*s  %-*s  %s", maxGroup, c.RegionGroup(ctx, r.ID), maxID, r.ID, r.DisplayName),
 			})
 		}
 		return out, nil

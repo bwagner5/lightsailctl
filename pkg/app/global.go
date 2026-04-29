@@ -24,6 +24,14 @@ func RegionSwitchOp(region *string) registry.Operation {
 			{
 				Flag: "region", Required: true, Help: "AWS region (blank = global)",
 				Suggest: func(_ context.Context) ([]registry.Choice, error) {
+					// Uses the embedded-snapshot wrappers intentionally:
+					// this picker runs inside triad's GlobalOp hook
+					// which only gets the *string region pointer — no
+					// *lightsail.Client in scope. The snapshot is
+					// refreshed at release time via `make regions-
+					// snapshot`, so the picker lags at most one release
+					// behind AWS. Fan-out (buckets/instances) and the
+					// create wizard use the live Client.Regions path.
 					regions := lightsail.SortRegionsByGroup(lightsail.SupportedRegions())
 					// Format each region as "<group>   <id>   <location>"
 					// with group-aligned columns.
