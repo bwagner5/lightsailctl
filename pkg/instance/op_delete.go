@@ -7,7 +7,7 @@ import (
 	"github.com/bwagner5/triad/pkg/registry"
 )
 
-func deleteOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
+func deleteOp(s *Store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
 	return registry.Operation{
 		Name: "delete", Aliases: []string{"rm"}, Key: "ctrl+d",
 		Short:   "delete a Lightsail instance",
@@ -22,7 +22,7 @@ func deleteOp(s *store, suggest func(context.Context) ([]registry.Choice, error)
 	}
 }
 
-func resolveRegionStep(s *store) func(context.Context, *registry.State) error {
+func resolveRegionStep(s *Store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		c, err := s.ensure(ctx)
 		if err != nil {
@@ -37,7 +37,7 @@ func resolveRegionStep(s *store) func(context.Context, *registry.State) error {
 	}
 }
 
-func deleteInstanceStep(s *store) func(context.Context, *registry.State) error {
+func deleteInstanceStep(s *Store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		c, err := s.ensure(ctx)
 		if err != nil {

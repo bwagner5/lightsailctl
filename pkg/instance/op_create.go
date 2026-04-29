@@ -12,53 +12,71 @@ import (
 	"github.com/aws/lightsailctl/pkg/names"
 )
 
-func createOp(s *store) registry.Operation {
-	bpType := "os"           // shared: blueprint-type → blueprint filtering
-	platform := "LINUX_UNIX" // shared: blueprint → bundle filtering
-	bpSuggest, bpValidate := blueprintSuggestAndValidate(s, &bpType, &platform)
+func createOp(s *Store) registry.Operation {
 	return registry.Operation{
 		Name: "create", Key: "c", Short: "create a new Lightsail instance",
 		Confirm: "Create this instance?",
-		Fields: []registry.Field{
-			{Flag: "name", Short: "n", Help: "instance name", Required: true,
-				Prefill: names.Random, Validate: names.ValidateLabel},
-			{Flag: "region", Short: "r", Help: "AWS region", Required: true,
-				Default: "us-east-1", Suggest: regionSuggest()},
-			{Flag: "blueprint-type", Help: "blueprint category", Default: "os",
-				Suggest: func(_ context.Context) ([]registry.Choice, error) {
-					return []registry.Choice{
-						{Value: "os", Display: "os    Base operating systems (Amazon Linux, Ubuntu, Debian, …)"},
-						{Value: "app", Display: "app   Pre-configured applications (WordPress, LAMP, Node.js, …)"},
-					}, nil
-				},
-				Validate: func(v string) error {
-					bpType = v // capture selection for blueprint filtering
-					return nil
-				}},
-			{Flag: "blueprint", Short: "b", Help: "OS / image", Required: true,
-				Default: "amazon_linux_2023", Suggest: bpSuggest, Validate: bpValidate},
-			{Flag: "bundle", Help: "instance size", Required: true,
-				Default: "micro_x_x", Suggest: bundleSuggest(s, &platform)},
-			{Flag: "ip-address-type", Help: "networking stack", Default: "dualstack",
-				Suggest: func(_ context.Context) ([]registry.Choice, error) {
-					return []registry.Choice{
-						{Value: "dualstack", Display: "dualstack  IPv4 + IPv6"},
-						{Value: "ipv6", Display: "ipv6       IPv6 only"},
-					}, nil
-				}},
-			{Flag: "user-data", Help: "launch script", File: true},
-			{Flag: "monitoring", Help: "detailed monitoring", Default: "false",
-				Suggest: func(_ context.Context) ([]registry.Choice, error) {
-					return []registry.Choice{
-						{Value: "false", Display: "No   Basic monitoring (free)"},
-						{Value: "true", Display: "Yes  Detailed monitoring (additional cost)"},
-					}, nil
-				}},
-		},
-		Steps: []registry.Step{
-			{Label: "Create instance", Do: createInstanceStep(s)},
-		},
+		Fields:  CreateFields(s),
+		Steps:   []registry.Step{CreateStep(s)},
 	}
+}
+
+// CreateFields returns the Fields the instance-create wizard prompts for.
+// The returned closures share state (blueprint-type filters blueprint;
+// blueprint filters bundle) and must be collected in order. Call this
+// exactly once per saga — the shared pointers are reallocated on each
+// call, so two concurrent callers would get tangled filtering state.
+//
+// The store is the read-side the pickers hit. Callers that want the
+// pickers to honor a region already pinned by a parent flow should pass
+// the same Store they're using elsewhere (see NewStore).
+func CreateFields(s *Store) []registry.Field {
+	bpType := "os"           // shared: blueprint-type → blueprint filtering
+	platform := "LINUX_UNIX" // shared: blueprint → bundle filtering
+	bpSuggest, bpValidate := blueprintSuggestAndValidate(s, &bpType, &platform)
+	return []registry.Field{
+		{Flag: "name", Short: "n", Help: "instance name", Required: true,
+			Prefill: names.Random, Validate: names.ValidateLabel},
+		{Flag: "region", Short: "r", Help: "AWS region", Required: true,
+			Default: "us-east-1", Suggest: regionSuggest()},
+		{Flag: "blueprint-type", Help: "blueprint category", Default: "os",
+			Suggest: func(_ context.Context) ([]registry.Choice, error) {
+				return []registry.Choice{
+					{Value: "os", Display: "os    Base operating systems (Amazon Linux, Ubuntu, Debian, …)"},
+					{Value: "app", Display: "app   Pre-configured applications (WordPress, LAMP, Node.js, …)"},
+				}, nil
+			},
+			Validate: func(v string) error {
+				bpType = v // capture selection for blueprint filtering
+				return nil
+			}},
+		{Flag: "blueprint", Short: "b", Help: "OS / image", Required: true,
+			Default: "amazon_linux_2023", Suggest: bpSuggest, Validate: bpValidate},
+		{Flag: "bundle", Help: "instance size", Required: true,
+			Default: "micro_x_x", Suggest: bundleSuggest(s, &platform)},
+		{Flag: "ip-address-type", Help: "networking stack", Default: "dualstack",
+			Suggest: func(_ context.Context) ([]registry.Choice, error) {
+				return []registry.Choice{
+					{Value: "dualstack", Display: "dualstack  IPv4 + IPv6"},
+					{Value: "ipv6", Display: "ipv6       IPv6 only"},
+				}, nil
+			}},
+		{Flag: "user-data", Help: "launch script", File: true},
+		{Flag: "monitoring", Help: "detailed monitoring", Default: "false",
+			Suggest: func(_ context.Context) ([]registry.Choice, error) {
+				return []registry.Choice{
+					{Value: "false", Display: "No   Basic monitoring (free)"},
+					{Value: "true", Display: "Yes  Detailed monitoring (additional cost)"},
+				}, nil
+			}},
+	}
+}
+
+// CreateStep returns the single step that runs CreateInstance with the
+// inputs produced by CreateFields. Exposed so the deploy flow can splice
+// instance creation into its own saga without duplicating the body.
+func CreateStep(s *Store) registry.Step {
+	return registry.Step{Label: "Create instance", Do: createInstanceStep(s)}
 }
 
 func regionSuggest() func(context.Context) ([]registry.Choice, error) {
@@ -84,7 +102,7 @@ func regionSuggest() func(context.Context) ([]registry.Choice, error) {
 	}
 }
 
-func blueprintSuggestAndValidate(s *store, bpType, platform *string) (func(context.Context) ([]registry.Choice, error), func(string) error) {
+func blueprintSuggestAndValidate(s *Store, bpType, platform *string) (func(context.Context) ([]registry.Choice, error), func(string) error) {
 	var cached []lightsail.Blueprint
 	suggest := func(ctx context.Context) ([]registry.Choice, error) {
 		c, err := s.ensure(ctx)
@@ -126,7 +144,7 @@ func blueprintSuggestAndValidate(s *store, bpType, platform *string) (func(conte
 	return suggest, validate
 }
 
-func bundleSuggest(s *store, platform *string) func(context.Context) ([]registry.Choice, error) {
+func bundleSuggest(s *Store, platform *string) func(context.Context) ([]registry.Choice, error) {
 	return func(ctx context.Context) ([]registry.Choice, error) {
 		c, err := s.ensure(ctx)
 		if err != nil {
@@ -164,7 +182,7 @@ func containsPlatform(platforms []string, target string) bool {
 	return false
 }
 
-func createInstanceStep(s *store) func(context.Context, *registry.State) error {
+func createInstanceStep(s *Store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		c, err := s.ensure(ctx)
 		if err != nil {

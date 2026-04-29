@@ -12,7 +12,7 @@ import (
 	"github.com/aws/lightsailctl/pkg/lightsail"
 )
 
-func sshOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
+func sshOp(s *Store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
 	return registry.Operation{
 		Name: "ssh", Aliases: []string{"connect"}, Key: "x",
 		Short:   "SSH to an instance",

@@ -22,20 +22,20 @@ type Row struct {
 	Bundle    string
 }
 
-type store struct {
+type Store struct {
 	region      *string
 	regionHints []string
 	client      *lightsail.Client
 }
 
-func (s *store) currentRegion() string {
+func (s *Store) currentRegion() string {
 	if s.region == nil {
 		return ""
 	}
 	return *s.region
 }
 
-func (s *store) ensure(ctx context.Context) (*lightsail.Client, error) {
+func (s *Store) ensure(ctx context.Context) (*lightsail.Client, error) {
 	r := s.currentRegion()
 	if s.client != nil && s.client.Region() == r {
 		return s.client, nil
@@ -51,7 +51,7 @@ func (s *store) ensure(ctx context.Context) (*lightsail.Client, error) {
 	return c, nil
 }
 
-func (s *store) List(ctx context.Context, _ registry.Filter) ([]any, error) {
+func (s *Store) List(ctx context.Context, _ registry.Filter) ([]any, error) {
 	c, err := s.ensure(ctx)
 	if err != nil {
 		return nil, err
@@ -76,7 +76,7 @@ func (s *store) List(ctx context.Context, _ registry.Filter) ([]any, error) {
 	return out, nil
 }
 
-func (s *store) Get(ctx context.Context, id string) (any, error) {
+func (s *Store) Get(ctx context.Context, id string) (any, error) {
 	c, err := s.ensure(ctx)
 	if err != nil {
 		return nil, err
@@ -114,7 +114,7 @@ func Resource(region *string, regionHints []string) registry.Resource {
 		{Name: "Bundle", Flag: "bundle", Help: "instance size",
 			Table: registry.TableHint{Header: "BUNDLE", Wide: true}},
 	}
-	st := &store{region: region, regionHints: regionHints}
+	st := NewStore(region, regionHints)
 	suggest := registry.SuggestFrom(st, fields, "name")
 	return registry.Resource{
 		Name:    "instance",
@@ -132,6 +132,15 @@ func Resource(region *string, regionHints []string) registry.Resource {
 			"ssh":      sshOp(st, suggest),
 		},
 	}
+}
+
+// NewStore builds a Store with the same construction rules Resource uses.
+// Exposed so callers in other packages (e.g. the app deploy flow) can
+// build an instance Store that shares the caller's --region pointer and
+// region hints. The *string region lets a parent flow pin/unpin the
+// region via its existing mutable pointer.
+func NewStore(region *string, regionHints []string) *Store {
+	return &Store{region: region, regionHints: regionHints}
 }
 
 func formatTime(t time.Time) string {

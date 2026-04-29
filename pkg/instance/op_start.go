@@ -7,7 +7,7 @@ import (
 	"github.com/bwagner5/triad/pkg/registry"
 )
 
-func startOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
+func startOp(s *Store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
 	return registry.Operation{
 		Name: "start", Key: "s", Short: "start a stopped instance",
 		Enabled: isStopped,
@@ -21,7 +21,7 @@ func startOp(s *store, suggest func(context.Context) ([]registry.Choice, error))
 	}
 }
 
-func startInstanceStep(s *store) func(context.Context, *registry.State) error {
+func startInstanceStep(s *Store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		c, err := s.ensure(ctx)
 		if err != nil {

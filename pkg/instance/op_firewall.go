@@ -11,7 +11,7 @@ import (
 	lstypes "github.com/aws/aws-sdk-go-v2/service/lightsail/types"
 )
 
-func firewallOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
+func firewallOp(s *Store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
 	return registry.Operation{
 		Name: "firewall", Aliases: []string{"fw"}, Key: "f",
 		Short:   "update instance firewall rules",
@@ -27,7 +27,7 @@ func firewallOp(s *store, suggest func(context.Context) ([]registry.Choice, erro
 	}
 }
 
-func firewallStep(s *store) func(context.Context, *registry.State) error {
+func firewallStep(s *Store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		c, err := s.ensure(ctx)
 		if err != nil {

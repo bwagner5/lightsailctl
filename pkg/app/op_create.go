@@ -36,7 +36,7 @@ func createOp(s *store) registry.Operation {
 			{Flag: "name", Short: "n", Help: "app name", Prefill: names.DefaultAppName,
 				Required: true, Validate: names.ValidateLabel},
 			{Flag: "env", Short: "e", Help: "environment", Default: "dev", Required: true, Validate: names.ValidateLabel},
-			{Flag: "instance", Help: "target Lightsail instance (region inferred from selection)",
+			{Flag: "instance", Help: "target Lightsail instance",
 				Required: true, Suggest: instanceSuggest(s)},
 			{Flag: "agent-path", Help: "lightsailctl binary to scp to the instance (linux/amd64)",
 				Required: true, File: true},
