@@ -22,6 +22,23 @@ type Provisioner struct {
 	IAM *iam.Client
 }
 
+// NewIAMClient builds an iam.Client from an aws.Config. IAM is a
+// global service but the SDK's endpoint resolver still requires a
+// region; an empty-region Config makes every call fail with
+// "Missing Region". We paper over that by forcing us-east-1 when the
+// caller's Config has no region pinned.
+//
+// Callers that have Lightsail pinned to a region (the common case
+// inside a deploy) will have that region passed through unchanged —
+// IAM honors any region in the aws partition.
+func NewIAMClient(cfg aws.Config) *iam.Client {
+	if cfg.Region == "" {
+		cfg = cfg.Copy()
+		cfg.Region = "us-east-1"
+	}
+	return iam.NewFromConfig(cfg)
+}
+
 // EnsureOIDCProvider is idempotent: if the GitHub OIDC provider
 // already exists in the account it returns its ARN with reused=true;
 // otherwise it creates it. The returned error is nil on both paths

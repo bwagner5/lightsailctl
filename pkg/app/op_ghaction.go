@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/bwagner5/triad/pkg/registry"
 
 	"github.com/aws/lightsailctl/pkg/config"
@@ -311,7 +310,7 @@ func ensureProviderStep(s *store) func(context.Context, *registry.State) error {
 		if err != nil {
 			return err
 		}
-		iamClient := iam.NewFromConfig(c.Config())
+		iamClient := iamoidc.NewIAMClient(c.Config())
 		p := iamoidc.Provisioner{IAM: iamClient}
 		acct, _ := st.Data["acct"].(string)
 		arn, reused, err := p.EnsureOIDCProvider(ctx, acct)
@@ -336,7 +335,7 @@ func ensureRoleStep(s *store) func(context.Context, *registry.State) error {
 		if err != nil {
 			return err
 		}
-		iamClient := iam.NewFromConfig(c.Config())
+		iamClient := iamoidc.NewIAMClient(c.Config())
 		p := iamoidc.Provisioner{IAM: iamClient}
 
 		trust, _ := st.Data["iam.trust"].(string)
@@ -492,7 +491,7 @@ func deleteRoleStep(s *store) func(context.Context, *registry.State) error {
 		if err != nil {
 			return err
 		}
-		iamClient := iam.NewFromConfig(c.Config())
+		iamClient := iamoidc.NewIAMClient(c.Config())
 		p := iamoidc.Provisioner{IAM: iamClient}
 		roleName, _ := st.Data["iam.role_name"].(string)
 		if err := p.DeleteRole(ctx, roleName); err != nil {
