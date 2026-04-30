@@ -311,7 +311,8 @@ func tokenLooksLikePAT(tok string) bool {
 	// 40-char hex (legacy) also looks PAT-ish.
 	if len(tok) == 40 {
 		for _, r := range tok {
-			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			isHex := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+			if !isHex {
 				return true // not legacy hex but still allow
 			}
 		}
