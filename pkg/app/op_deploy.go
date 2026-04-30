@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/bwagner5/triad/pkg/registry"
@@ -129,6 +130,18 @@ func deployOp(s *store) registry.Operation {
 				Section: "New Lightsail Instance", When: wantsNew,
 				Suggest: niMonitoringSuggest()},
 
+			// ── Agent binary ─────────────────────────────────────
+			// Shown only when Pre couldn't auto-resolve (via local
+			// build output or per-version cache). Conf-stored values
+			// and explicit --agent-path both bypass the prompt via
+			// CompleteInput's "already set" fast path.
+			{Flag: "agent-path",
+				Label:   "Agent binary",
+				Help:    "linux/amd64 lightsailctl binary to scp to the instance",
+				Section: "Agent Binary",
+				File:    true,
+				When:    needsAgentBinaryPrompt},
+
 			// ── Review & Confirm ─────────────────────────────────
 			{Flag: "deploy-confirm", Label: "Proceed",
 				Help:         "confirm before any changes land",
@@ -141,10 +154,6 @@ func deployOp(s *store) registry.Operation {
 			},
 
 			// ── Hidden fields (flags only; not prompted) ─────────
-			{Flag: "agent-path",
-				Label: "Agent binary",
-				Help:  "lightsailctl binary to scp to the instance (linux/amd64); auto-fetched from the matching release when unset",
-				File:  true, Wizard: registry.BoolPtr(false)},
 			{Flag: "region", Help: "AWS region (auto-filled from --instance)",
 				Wizard: registry.BoolPtr(false)},
 			{Flag: "wait-timeout", Help: "how long to wait for healthy", Default: "3m",
@@ -152,7 +161,7 @@ func deployOp(s *store) registry.Operation {
 			{Flag: "no-wait", Help: "upload and exit without waiting for health", Default: "false",
 				Wizard: registry.BoolPtr(false)},
 		},
-		Pre: preloadFromConf,
+		Pre: deployPre,
 		Steps: []registry.Step{
 			{Label: "Inspect lightsail.conf", Do: func(ctx context.Context, st *registry.State) error {
 				// Announce app to table (housekeeping).
@@ -307,10 +316,85 @@ func yesNoSuggest(noDesc, yesDesc string) func(context.Context) ([]registry.Choi
 	}
 }
 
-// preloadFromConf is the op Pre hook: hydrates Input from lightsail.conf
-// before the wizard considers what's missing. If the conf is complete
-// the wizard shows nothing; if partial, the wizard opens with known
-// fields prefilled.
+// deployPre is the op Pre hook. Runs:
+//
+//   1. preloadFromConf — hydrates Input from lightsail.conf.
+//   2. preresolveAgentBinary — tries the local-cache / local-build
+//      fallbacks (no network) to pre-populate Input["agent-path"].
+//      If resolution succeeds, the wizard skips the agent-path field
+//      via its already-set fast path. If nothing is found, Input is
+//      left empty so the wizard's File picker runs.
+//
+// Under -y, both steps run; missing agent-path will still produce a
+// clear saga-time error via resolveAgentStep, which is where we also
+// attempt the network download.
+func deployPre(ctx context.Context, in registry.Input) error {
+	if err := preloadFromConf(ctx, in); err != nil {
+		return err
+	}
+	preresolveAgentBinary(ctx, in)
+	return nil
+}
+
+// preresolveAgentBinary best-effort fills Input["agent-path"] from
+// non-network sources only: the per-version cache from a prior
+// successful deploy, or well-known local build output paths. Keeps
+// the wizard fast (no 5-minute HTTP timeout) and avoids asking the
+// user for a binary when one is already sitting in their repo.
+//
+// If nothing matches, Input is left untouched and the wizard's
+// agent-path file picker prompts. The saga's resolveAgentStep
+// performs the network download as a final fallback.
+func preresolveAgentBinary(ctx context.Context, in registry.Input) {
+	if in.Get("agent-path") != "" {
+		return // explicit flag or conf value wins
+	}
+	// Check the per-version cache first. If a prior deploy from the
+	// same lightsailctl build already downloaded the agent, it's
+	// here and we can skip the prompt.
+	cacheTarget := agentfetch.CachePath(agentfetch.UserCacheDir(), internal.Version().String())
+	if fi, err := os.Stat(cacheTarget); err == nil && !fi.IsDir() && fi.Size() > 0 {
+		if abs, aerr := filepath.Abs(cacheTarget); aerr == nil {
+			in["agent-path"] = abs
+			return
+		}
+	}
+	// Then try well-known local build output paths (goreleaser's
+	// dist/ layout, cross-compile convention). Mirrors the fallback
+	// list inside agentfetch.Resolve so both paths agree on what
+	// counts as a valid local binary.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	for _, rel := range []string{
+		"dist/lightsailctl_linux_amd64_v1/lightsailctl",
+		"lightsailctl_linux_amd64",
+		"lightsailctl-linux-amd64",
+	} {
+		p := filepath.Join(cwd, rel)
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
+			if abs, aerr := filepath.Abs(p); aerr == nil {
+				in["agent-path"] = abs
+				return
+			}
+		}
+	}
+}
+
+// needsAgentBinaryPrompt returns true when the agent-path wizard
+// field should be shown. Only true when Pre couldn't auto-resolve,
+// which is the "no local build, no cached binary, no explicit flag"
+// case — the exact case where the saga would otherwise fail with
+// the "could not obtain a linux/amd64 lightsailctl binary" error.
+func needsAgentBinaryPrompt(in registry.Input) bool {
+	return in.Get("agent-path") == ""
+}
+
+// preloadFromConf hydrates Input from lightsail.conf so an existing
+// conf skips the wizard entirely. If the conf is complete the wizard
+// shows nothing; if partial, the wizard opens with known fields
+// prefilled.
 func preloadFromConf(_ context.Context, in registry.Input) error {
 	cfg, _ := config.LoadFromCwd()
 	if cfg == nil {
