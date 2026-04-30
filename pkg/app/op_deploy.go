@@ -56,10 +56,12 @@ func deployOp(s *store) registry.Operation {
 	// Predicates used as Field.When values. Keep them as named vars so
 	// the field list below stays readable.
 	wantsNew := func(in registry.Input) bool {
-		return asBool(in.Get("create-new-instance"))
+		v, _ := in.Bool("create-new-instance")
+		return v
 	}
 	wantsExisting := func(in registry.Input) bool {
-		return !asBool(in.Get("create-new-instance")) && in.Get("instance") == ""
+		v, _ := in.Bool("create-new-instance")
+		return !v && in.Get("instance") == ""
 	}
 	askStrategy := func(in registry.Input) bool {
 		// Only prompt the yes/no when conf/flag didn't already name
@@ -83,6 +85,7 @@ func deployOp(s *store) registry.Operation {
 			// Yes/no gate. Hidden when --instance is already set.
 			{Flag: "create-new-instance", Label: "Target", Help: "use an existing instance or create a new one",
 				Section:  "Deployment Target",
+				Kind:     registry.KindBool,
 				Required: true,
 				When:     askStrategy,
 				Suggest: yesNoSuggest(
@@ -127,7 +130,7 @@ func deployOp(s *store) registry.Operation {
 				Section: "New Lightsail Instance", When: wantsNew, File: true},
 			{Flag: "__ni/monitoring", Label: "Detailed monitoring",
 				Help: "detailed monitoring", Default: "false",
-				Section: "New Lightsail Instance", When: wantsNew,
+				Section: "New Lightsail Instance", Kind: registry.KindBool, When: wantsNew,
 				Suggest: niMonitoringSuggest()},
 
 			// ── Agent binary ─────────────────────────────────────
@@ -146,6 +149,7 @@ func deployOp(s *store) registry.Operation {
 			{Flag: "deploy-confirm", Label: "Proceed",
 				Help:         "confirm before any changes land",
 				Section:      "Review & Confirm",
+				Kind:         registry.KindBool,
 				Required:     true,
 				PreambleFunc: deploySummaryPreamble,
 				Suggest: yesNoSuggest(
@@ -157,9 +161,9 @@ func deployOp(s *store) registry.Operation {
 			{Flag: "region", Help: "AWS region (auto-filled from --instance)",
 				Wizard: registry.BoolPtr(false)},
 			{Flag: "wait-timeout", Help: "how long to wait for healthy", Default: "3m",
-				Wizard: registry.BoolPtr(false)},
+				Kind: registry.KindDuration, Wizard: registry.BoolPtr(false)},
 			{Flag: "no-wait", Help: "upload and exit without waiting for health", Default: "false",
-				Wizard: registry.BoolPtr(false)},
+				Kind: registry.KindBool, Wizard: registry.BoolPtr(false)},
 		},
 		Pre: deployPre,
 		Steps: []registry.Step{
@@ -229,7 +233,7 @@ func deployOp(s *store) registry.Operation {
 				if skipIfAborted(st) {
 					return false
 				}
-				return st.Input.Get("no-wait") != "true"
+				return !skipIfNoWait(st)
 			}},
 			// ── GitHub Actions CI setup (first-run only) ─────────
 			// Gate: a single yes/no step that runs on a first-run
@@ -318,12 +322,12 @@ func yesNoSuggest(noDesc, yesDesc string) func(context.Context) ([]registry.Choi
 
 // deployPre is the op Pre hook. Runs:
 //
-//   1. preloadFromConf — hydrates Input from lightsail.conf.
-//   2. preresolveAgentBinary — tries the local-cache / local-build
-//      fallbacks (no network) to pre-populate Input["agent-path"].
-//      If resolution succeeds, the wizard skips the agent-path field
-//      via its already-set fast path. If nothing is found, Input is
-//      left empty so the wizard's File picker runs.
+//  1. preloadFromConf — hydrates Input from lightsail.conf.
+//  2. preresolveAgentBinary — tries the local-cache / local-build
+//     fallbacks (no network) to pre-populate Input["agent-path"].
+//     If resolution succeeds, the wizard skips the agent-path field
+//     via its already-set fast path. If nothing is found, Input is
+//     left empty so the wizard's File picker runs.
 //
 // Under -y, both steps run; missing agent-path will still produce a
 // clear saga-time error via resolveAgentStep, which is where we also
@@ -765,8 +769,8 @@ func releaseKeyStep(ctx context.Context, st *registry.State) error {
 }
 
 func skipIfNoWait(st *registry.State) bool {
-	v := st.Input.Get("no-wait")
-	return v == "true" || v == "1" || v == "yes"
+	v, _ := st.Input.Bool("no-wait")
+	return v
 }
 
 // ── compound Skip helpers used by the abort-graceful path ────────────
@@ -818,9 +822,12 @@ func skipCIOrAborted(inner func(*registry.State) bool) func(*registry.State) boo
 
 func waitStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
-		timeout, err := time.ParseDuration(firstNonEmpty(st.Input.Get("wait-timeout"), "3m"))
+		timeout, err := st.Input.Duration("wait-timeout")
 		if err != nil {
 			return fmt.Errorf("invalid --wait-timeout: %w", err)
+		}
+		if timeout == 0 {
+			timeout = 3 * time.Minute
 		}
 		c, err := s.ensure(ctx)
 		if err != nil {

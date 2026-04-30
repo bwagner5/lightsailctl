@@ -62,7 +62,7 @@ func CreateFields(s *Store) []registry.Field {
 				}, nil
 			}},
 		{Flag: "user-data", Help: "launch script", File: true},
-		{Flag: "monitoring", Help: "detailed monitoring", Default: "false",
+		{Flag: "monitoring", Help: "detailed monitoring", Default: "false", Kind: registry.KindBool,
 			Suggest: func(_ context.Context) ([]registry.Choice, error) {
 				return []registry.Choice{
 					{Value: "false", Display: "No   Basic monitoring (free)"},
@@ -217,7 +217,10 @@ func createInstanceStep(s *Store) func(context.Context, *registry.State) error {
 			}
 			userData = string(b)
 		}
-		monitoring := st.Input.Get("monitoring") == "true"
+		monitoring, err := st.Input.Bool("monitoring")
+		if err != nil {
+			return err
+		}
 		return rc.CreateInstance(ctx,
 			st.Input.Get("name"),
 			az,

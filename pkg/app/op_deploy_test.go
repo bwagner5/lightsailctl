@@ -155,6 +155,25 @@ func TestYesNoSuggest_EmitsBoolValues(t *testing.T) {
 	}
 }
 
+func TestDeployTypedFieldKinds(t *testing.T) {
+	op := deployOp(&store{})
+	cases := map[string]registry.FieldKind{
+		"create-new-instance": registry.KindBool,
+		"__ni/monitoring":     registry.KindBool,
+		"deploy-confirm":      registry.KindBool,
+		"wait-timeout":        registry.KindDuration,
+		"no-wait":             registry.KindBool,
+	}
+	for flag, want := range cases {
+		t.Run(flag, func(t *testing.T) {
+			f := fieldByFlag(t, op.Fields, flag)
+			if f.Kind != want {
+				t.Fatalf("%s kind = %v; want %v", flag, f.Kind, want)
+			}
+		})
+	}
+}
+
 // TestDeploySummaryPreamble_CreateNew confirms the summary picks up
 // __ni/* fields when strategy is create-new.
 func TestDeploySummaryPreamble_CreateNew(t *testing.T) {
@@ -173,6 +192,17 @@ func TestDeploySummaryPreamble_CreateNew(t *testing.T) {
 			t.Errorf("preamble missing %q:\n%s", want, got)
 		}
 	}
+}
+
+func fieldByFlag(t *testing.T, fields []registry.Field, flag string) registry.Field {
+	t.Helper()
+	for _, f := range fields {
+		if f.Flag == flag {
+			return f
+		}
+	}
+	t.Fatalf("field %q not found", flag)
+	return registry.Field{}
 }
 
 // TestDeploySummaryPreamble_UseExisting confirms the summary shows the
