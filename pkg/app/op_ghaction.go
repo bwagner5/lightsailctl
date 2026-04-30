@@ -695,6 +695,10 @@ func confirmIAMCreateStep(s *store) func(context.Context, *registry.State) error
 			Fields: []registry.Field{
 				{Flag: "iam-confirm", Required: true,
 					Help: "create this IAM role + trust policy", Kind: registry.KindBool,
+					// Default to Yes: the user already opted into CI
+					// setup at the previous prompt; this confirmation
+					// just surfaces the policies for review.
+					Default: "true",
 					Suggest: yesNoSuggest(
 						"show me the JSON and stop here",
 						"create the role"),

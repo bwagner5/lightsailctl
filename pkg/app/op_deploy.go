@@ -147,10 +147,14 @@ func deployOp(s *store) registry.Operation {
 
 			// ── Review & Confirm ─────────────────────────────────
 			{Flag: "deploy-confirm", Label: "Proceed",
-				Help:         "confirm before any changes land",
-				Section:      "Review & Confirm",
-				Kind:         registry.KindBool,
-				Required:     true,
+				Help:     "confirm before any changes land",
+				Section:  "Review & Confirm",
+				Kind:     registry.KindBool,
+				Required: true,
+				// Default to Yes: the user already stated intent by
+				// running `lightsailctl deploy`, so enter-without-
+				// arrow-key should proceed, not abort.
+				Default:      "true",
 				PreambleFunc: deploySummaryPreamble,
 				Suggest: yesNoSuggest(
 					"abort",
