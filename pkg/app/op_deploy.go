@@ -72,11 +72,11 @@ func deployOp(s *store) registry.Operation {
 		Fields: []registry.Field{
 			// ── Lightsail Application ────────────────────────────
 			{Flag: "name", Short: "n", Label: "App name", Help: "app name",
-				Section: "Lightsail Application",
+				Section:  "Lightsail Application",
 				Required: true, Prefill: names.DefaultAppName, Validate: names.ValidateLabel},
 			{Flag: "env", Short: "e", Label: "Environment", Help: "environment",
 				Section: "Lightsail Application",
-				Default:  "dev", Required: true, Validate: names.ValidateLabel},
+				Default: "dev", Required: true, Validate: names.ValidateLabel},
 
 			// ── Deployment Target ────────────────────────────────
 			// Yes/no gate. Hidden when --instance is already set.
@@ -91,8 +91,8 @@ func deployOp(s *store) registry.Operation {
 			// Existing-instance picker: shown only when the user
 			// chose "pick existing" and didn't already name one.
 			{Flag: "instance", Label: "Lightsail instance",
-				Help:    "target Lightsail instance",
-				Section: "Deployment Target",
+				Help:     "target Lightsail instance",
+				Section:  "Deployment Target",
 				Required: true,
 				When:     wantsExisting,
 				Suggest:  instanceSuggest(s)},
@@ -110,7 +110,7 @@ func deployOp(s *store) registry.Operation {
 			{Flag: "__ni/blueprint-type", Label: "Blueprint category",
 				Help: "blueprint category", Default: "os",
 				Section: "New Lightsail Instance", When: wantsNew,
-				Suggest: niBlueprintTypeSuggest(),
+				Suggest:  niBlueprintTypeSuggest(),
 				Validate: func(v string) error { niBpType = v; return nil }},
 			{Flag: "__ni/blueprint", Label: "Blueprint", Help: "OS / image",
 				Section: "New Lightsail Instance", Required: true, When: wantsNew,
@@ -210,12 +210,35 @@ func deployOp(s *store) registry.Operation {
 			{Label: "Finalize", Do: unpinStoreStep(s), Skip: func(st *registry.State) bool {
 				return st.Input.Get("no-wait") != "true"
 			}},
-			// Offer-CI tail step: only runs on a first-run deploy
-			// (conf didn't pre-exist) of a GitHub-hosted repo, and
-			// only in interactive mode. See offerGhActionStep doc.
+			// ── GitHub Actions CI setup (first-run only) ─────────
+			// Gate: a single yes/no step that runs on a first-run
+			// deploy (conf didn't pre-exist) of a GitHub-hosted repo,
+			// and only in interactive mode. All subsequent CI steps
+			// Skip unless the user opted in here, so the progress
+			// view shows the individual IAM / workflow work in the
+			// saga step list rather than hiding it inside one opaque
+			// "Offer GitHub Actions" row.
 			{Label: "Offer GitHub Actions deploy workflow",
-				Do:   offerGhActionStep(s),
+				Do:   offerGhActionChoiceStep,
 				Skip: skipOfferGhAction(s)},
+			{Label: "Detect GitHub remote", Do: detectRemoteStep,
+				Skip: skipUnlessOptedIntoCI},
+			{Label: "Resolve GitHub token", Do: resolveGhTokenStep,
+				Skip: skipUnlessOptedIntoCI},
+			{Label: "Fetch repo metadata", Do: fetchRepoStep,
+				Skip: skipCIFetchRepo},
+			{Label: "Build IAM policies", Do: buildPoliciesStep(s),
+				Skip: skipUnlessOptedIntoCI},
+			{Label: "Confirm IAM role creation", Do: confirmIAMCreateStep(s),
+				Skip: skipCIConfirmIAM(s)},
+			{Label: "Ensure OIDC provider", Do: ensureProviderStep(s),
+				Skip: skipCIProvisionIAM},
+			{Label: "Create IAM role", Do: ensureRoleStep(s),
+				Skip: skipCIProvisionIAM},
+			{Label: "Write workflow file", Do: writeWorkflowStep,
+				Skip: skipCIWriteWorkflow},
+			{Label: "GitHub Actions setup complete", Do: enableSummaryStep,
+				Skip: skipUnlessOptedIntoCI},
 		},
 	}
 }
@@ -256,14 +279,6 @@ func unpinStoreStep(s *store) func(context.Context, *registry.State) error {
 func skipUnlessCreatingNewInstance(st *registry.State) bool {
 	strategy, _ := st.Data["strategy"].(string)
 	return strategy != "create-new"
-}
-
-// skipIfCreatingNewInstance skips the existing-instance picker when
-// we're going to create a new one (or already did). Kept for any
-// legacy callers; the current deploy saga no longer uses it.
-func skipIfCreatingNewInstance(st *registry.State) bool {
-	strategy, _ := st.Data["strategy"].(string)
-	return strategy == "create-new"
 }
 
 // yesNoSuggest returns a Suggest that offers exactly two choices.

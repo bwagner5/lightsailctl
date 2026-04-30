@@ -284,7 +284,11 @@ func buildPoliciesStep(s *store) func(context.Context, *registry.State) error {
 		}
 		st.Data["iam.role_name"] = roleName
 
-		st.Output = "Trust policy:\n" + trust + "\n\nPermissions policy:\n" + perm + "\n"
+		// Clear output — the policies are shown by the IAM confirm
+		// step (confirmIAMCreateStep), which has the additional
+		// context of the account ID and role name. Duplicating the
+		// JSON blob here would crowd the saga step list.
+		st.Output = fmt.Sprintf("Policies built for role %s", roleName)
 		return nil
 	}
 }
@@ -319,9 +323,9 @@ func ensureProviderStep(s *store) func(context.Context, *registry.State) error {
 		}
 		st.Data["iam.provider_arn"] = arn
 		if reused {
-			st.Output = "Reused existing OIDC provider: " + arn
+			st.Output = "Reused existing GitHub OIDC provider\nARN: " + arn
 		} else {
-			st.Output = "Created OIDC provider: " + arn
+			st.Output = "Created GitHub OIDC provider\nARN: " + arn
 		}
 		return nil
 	}
@@ -359,11 +363,15 @@ func ensureRoleStep(s *store) func(context.Context, *registry.State) error {
 			return err
 		}
 		st.Data["iam.role_arn"] = res.ARN
+		var action string
 		if res.Created {
-			st.Output = "Created role: " + res.ARN
+			action = "Created"
 		} else {
-			st.Output = "Reconciled existing role: " + res.ARN
+			action = "Reconciled"
 		}
+		st.Output = action + " role\n" +
+			"ARN: " + res.ARN + "\n" +
+			"Inline policy: " + iamoidc.InlinePolicyName
 		return nil
 	}
 }
@@ -556,68 +564,155 @@ func skipOfferGhAction(s *store) func(st *registry.State) bool {
 	}
 }
 
-// offerGhActionStep prompts the user once to opt into CI setup. On
-// yes, runs the shared enable-gh-action steps inline against the same
-// saga state. On no, does nothing and the deploy completes normally.
-//
-// The field name "offer-gh-action" is namespaced to this step so it
-// doesn't collide with the enable-gh-action op's own fields.
-func offerGhActionStep(s *store) func(context.Context, *registry.State) error {
-	return func(ctx context.Context, st *registry.State) error {
-		// First visit: ask yes/no.
-		if st.Input.Get("offer-gh-action") == "" {
-			return &registry.NeedInput{
-				Reason: "Set up a GitHub Actions workflow so pushes auto-deploy?",
-				Fields: []registry.Field{
-					{Flag: "offer-gh-action", Required: true,
-						Help: "opt in to CI setup",
-						Suggest: yesNoSuggest(
-							"I'll do this later",
-							"walk me through it"),
-					},
-				},
-			}
-		}
+// offerGhActionChoiceStep is the single yes/no gate: asks the user
+// whether to set up a GitHub Actions workflow. Records the answer in
+// Input["offer-gh-action"]. Subsequent CI steps read that answer via
+// skipUnlessOptedIntoCI so the deploy saga shows their individual
+// progress rows in the live view.
+func offerGhActionChoiceStep(_ context.Context, st *registry.State) error {
+	if st.Input.Get("offer-gh-action") != "" {
+		// Already answered (e.g. by flag or by an earlier round).
 		if !asBool(st.Input.Get("offer-gh-action")) {
 			st.Output = "Skipped GitHub Actions setup. Run " +
 				"`lightsailctl app enable-gh-action` later to set it up."
-			return nil
-		}
-
-		// Yes path: run the enable-gh-action saga inline. We reuse
-		// the same step funcs so behavior stays in sync — this is
-		// explicitly the plan's "same shared saga" contract.
-		//
-		// Each sub-step may return NeedInput; we let that bubble up,
-		// which makes the runtime pause the deploy saga at this
-		// parent step and prompt the user. On the retry, the
-		// question that was asked has been answered and we make
-		// progress to the next sub-step. That's safe here because
-		// each sub-step is itself idempotent.
-		substeps := []struct {
-			label string
-			skip  func(*registry.State) bool
-			do    func(context.Context, *registry.State) error
-		}{
-			{"Detect git remote", nil, detectRemoteStep},
-			{"Resolve GitHub token", nil, resolveGhTokenStep},
-			{"Fetch repo metadata", skipIfDetachedFromGitHub, fetchRepoStep},
-			{"Build IAM policies", nil, buildPoliciesStep(s)},
-			{"Ensure OIDC provider", skipRoleProvisioning, ensureProviderStep(s)},
-			{"Ensure role + inline policy", skipRoleProvisioning, ensureRoleStep(s)},
-			{"Write workflow file", skipIfSkipWorkflow, writeWorkflowStep},
-			{"Summary", nil, enableSummaryStep},
-		}
-		for _, sub := range substeps {
-			if sub.skip != nil && sub.skip(st) {
-				continue
-			}
-			if err := sub.do(ctx, st); err != nil {
-				return err
-			}
 		}
 		return nil
 	}
+	return &registry.NeedInput{
+		Reason: "Set up a GitHub Actions workflow so pushes auto-deploy?",
+		Fields: []registry.Field{
+			{Flag: "offer-gh-action", Required: true,
+				Help: "opt in to CI setup",
+				Suggest: yesNoSuggest(
+					"I'll do this later",
+					"walk me through it"),
+			},
+		},
+	}
+}
+
+// skipUnlessOptedIntoCI returns true when the user declined CI setup
+// or never reached the offer step. All GitHub-Actions work steps use
+// this as their base skip condition.
+func skipUnlessOptedIntoCI(st *registry.State) bool {
+	return !asBool(st.Input.Get("offer-gh-action"))
+}
+
+// skipCIFetchRepo skips the repo-metadata fetch when the user declined
+// CI, or when --github-auth=none means they've supplied repo info
+// themselves and we should make no GitHub API calls.
+func skipCIFetchRepo(st *registry.State) bool {
+	if skipUnlessOptedIntoCI(st) {
+		return true
+	}
+	return strings.EqualFold(st.Input.Get("github-auth"), "none")
+}
+
+// skipCIConfirmIAM skips the IAM confirmation when we're not opted in
+// OR when the caller already passed --iam-confirm (e.g. on a re-run).
+// Under -y, the confirmation is inapplicable — but we never reach
+// this path because offerGhActionChoiceStep itself is skipped under -y.
+func skipCIConfirmIAM(s *store) func(*registry.State) bool {
+	return func(st *registry.State) bool {
+		if skipUnlessOptedIntoCI(st) {
+			return true
+		}
+		// Already answered (e.g. because user retried the saga after
+		// a transient failure and flagged --iam-confirm=true): skip.
+		if st.Input.Get("iam-confirm") != "" {
+			return true
+		}
+		// Non-interactive mode: no confirm prompt possible; proceed
+		// silently. A -y caller who reached the CI branch is the
+		// offer-gh-action flag path.
+		if !s.Interactive() {
+			return true
+		}
+		return false
+	}
+}
+
+// skipCIProvisionIAM skips the actual IAM mutation steps when the
+// user declined the IAM confirm, when --skip-role-create=true, or
+// when --dry-run=true.
+func skipCIProvisionIAM(st *registry.State) bool {
+	if skipUnlessOptedIntoCI(st) {
+		return true
+	}
+	if st.Input.Get("iam-confirm") != "" && !asBool(st.Input.Get("iam-confirm")) {
+		return true
+	}
+	return skipRoleProvisioning(st)
+}
+
+// skipCIWriteWorkflow skips the workflow-file write when opted out of
+// CI, when --skip-workflow=true, OR when the IAM confirm was declined.
+// We never write the workflow if the role wasn't provisioned — the
+// generated YAML would reference a non-existent role.
+func skipCIWriteWorkflow(st *registry.State) bool {
+	if skipUnlessOptedIntoCI(st) {
+		return true
+	}
+	if st.Input.Get("iam-confirm") != "" && !asBool(st.Input.Get("iam-confirm")) {
+		return true
+	}
+	return skipIfSkipWorkflow(st)
+}
+
+// confirmIAMCreateStep shows the fully rendered trust + permissions
+// policies, the role name, and the AWS account, and requires explicit
+// confirmation before creating anything. The policies are built by
+// the preceding buildPoliciesStep and stashed on st.Data.
+//
+// The step writes the answer to Input["iam-confirm"]; skipCIProvisionIAM
+// checks that before running the mutation steps.
+func confirmIAMCreateStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		if st.Input.Get("iam-confirm") != "" {
+			if !asBool(st.Input.Get("iam-confirm")) {
+				return fmt.Errorf("IAM role creation declined by user")
+			}
+			return nil
+		}
+		acct, _ := st.Data["acct"].(string)
+		roleName, _ := st.Data["iam.role_name"].(string)
+		trust, _ := st.Data["iam.trust"].(string)
+		perm, _ := st.Data["iam.perm"].(string)
+
+		var b strings.Builder
+		fmt.Fprintf(&b, "The following IAM role will be created in AWS account %s:\n\n", acct)
+		fmt.Fprintf(&b, "  Role name   %s\n", roleName)
+		fmt.Fprintf(&b, "  Role ARN    arn:aws:iam::%s:role/%s\n\n", acct, roleName)
+		b.WriteString("Trust policy (who can assume the role):\n")
+		b.WriteString(indent(trust, "  "))
+		b.WriteString("\n\nPermissions policy (what the role can do):\n")
+		b.WriteString(indent(perm, "  "))
+		b.WriteString("\n")
+
+		return &registry.NeedInput{
+			Reason: b.String(),
+			Fields: []registry.Field{
+				{Flag: "iam-confirm", Required: true,
+					Help: "create this IAM role + trust policy",
+					Suggest: yesNoSuggest(
+						"show me the JSON and stop here",
+						"create the role"),
+				},
+			},
+		}
+	}
+}
+
+// indent prefixes every line of s with prefix.
+func indent(s, prefix string) string {
+	if s == "" {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, ln := range lines {
+		lines[i] = prefix + ln
+	}
+	return strings.Join(lines, "\n")
 }
 
 // asBool is a lenient bool parser used on Input values. Treats the
