@@ -55,8 +55,10 @@ func deployOp(s *store) registry.Operation {
 			// no instances exist globally.
 			{Flag: "create-new-instance", Help: "create a new Lightsail instance as part of deploy",
 				Default: "false", Wizard: registry.BoolPtr(false)},
-			{Flag: "agent-path", Help: "lightsailctl binary to scp to the instance (linux/amd64); auto-fetched from the matching release when unset",
-				File: true},
+			{Flag: "agent-path",
+				Label: "Agent binary",
+				Help:  "lightsailctl binary to scp to the instance (linux/amd64); auto-fetched from the matching release when unset",
+				File:  true},
 			{Flag: "region", Help: "AWS region (auto-filled from --instance)",
 				Wizard: registry.BoolPtr(false)},
 			{Flag: "wait-timeout", Help: "how long to wait for healthy", Default: "3m",
