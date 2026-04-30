@@ -51,13 +51,13 @@ func enableGhActionOp(s *store, suggest func(context.Context) ([]registry.Choice
 			{Flag: "github-token", Help: "GitHub PAT (only read when --github-auth=token)",
 				Sensitive: true, Wizard: registry.BoolPtr(false)},
 			{Flag: "skip-role-create", Help: "use an existing role ARN instead of creating one",
-				Default: "false", Wizard: registry.BoolPtr(false)},
-			{Flag: "role-arn", Help: "required when --skip-role-create=true",
+				Default: "false", Kind: registry.KindBool, Wizard: registry.BoolPtr(false)},
+			{Flag: "role-arn", Help: "required when --skip-role-create is set",
 				Wizard: registry.BoolPtr(false)},
 			{Flag: "skip-workflow", Help: "don't write the workflow file (print it instead)",
-				Default: "false", Wizard: registry.BoolPtr(false)},
+				Default: "false", Kind: registry.KindBool, Wizard: registry.BoolPtr(false)},
 			{Flag: "dry-run", Help: "print every resource, make no changes",
-				Default: "false", Wizard: registry.BoolPtr(false)},
+				Default: "false", Kind: registry.KindBool, Wizard: registry.BoolPtr(false)},
 		},
 		Pre: preloadGhActionFromConf,
 		Steps: []registry.Step{
@@ -90,7 +90,7 @@ func disableGhActionOp(s *store, suggest func(context.Context) ([]registry.Choic
 			{Flag: "role-name", Help: "IAM role name (defaults to the enable-gh-action default)",
 				Wizard: registry.BoolPtr(false)},
 			{Flag: "skip-workflow", Help: "don't remove the local workflow file",
-				Default: "false", Wizard: registry.BoolPtr(false)},
+				Default: "false", Kind: registry.KindBool, Wizard: registry.BoolPtr(false)},
 		},
 		Pre: preloadGhActionFromConf,
 		Steps: []registry.Step{
@@ -297,10 +297,10 @@ func buildPoliciesStep(s *store) func(context.Context, *registry.State) error {
 // --dry-run=true. Also true when the caller supplied an explicit
 // --role-arn (they've already provisioned the role out-of-band).
 func skipRoleProvisioning(st *registry.State) bool {
-	if asBool(st.Input.Get("dry-run")) {
+	if inputBool(st.Input, "dry-run") {
 		return true
 	}
-	if asBool(st.Input.Get("skip-role-create")) {
+	if inputBool(st.Input, "skip-role-create") {
 		return true
 	}
 	return false
@@ -355,9 +355,9 @@ func ensureRoleStep(s *store) func(context.Context, *registry.State) error {
 			Description:       fmt.Sprintf("CI deploy role for %s/%s (%s/%s)", owner, repo, st.Input.Get("name"), st.Input.Get("env")),
 			Tags: map[string]string{
 				lightsail.VersionTagKey: lightsail.CLIVersion(),
-				"lightsailctl:app":     st.Input.Get("name"),
-				"lightsailctl:env":     st.Input.Get("env"),
-				"lightsailctl:repo":    owner + "/" + repo,
+				"lightsailctl:app":      st.Input.Get("name"),
+				"lightsailctl:env":      st.Input.Get("env"),
+				"lightsailctl:repo":     owner + "/" + repo,
 			},
 		})
 		if err != nil {
@@ -407,7 +407,7 @@ func writeWorkflowStep(ctx context.Context, st *registry.State) error {
 		Branch:  firstNonEmpty(st.Input.Get("branch"), "main"),
 	}
 
-	if asBool(st.Input.Get("dry-run")) {
+	if inputBool(st.Input, "dry-run") {
 		content, err := ghaction.RenderWorkflow(in)
 		if err != nil {
 			return err
@@ -456,7 +456,7 @@ func asExists(err error, target **ghaction.ExistsError) bool {
 
 // skipIfSkipWorkflow returns true when --skip-workflow=true.
 func skipIfSkipWorkflow(st *registry.State) bool {
-	return asBool(st.Input.Get("skip-workflow"))
+	return inputBool(st.Input, "skip-workflow")
 }
 
 // enableSummaryStep emits the final "Done" message with next-step
@@ -466,7 +466,7 @@ func enableSummaryStep(_ context.Context, st *registry.State) error {
 	b.WriteString("GitHub Actions deploy ready.\n\n")
 	if path, ok := st.Data["gh.wf_path"].(string); ok {
 		fmt.Fprintf(&b, "Commit and push:\n  git add %s\n  git commit -m \"ci: add Lightsail deploy workflow\"\n  git push\n", path)
-	} else if asBool(st.Input.Get("dry-run")) {
+	} else if inputBool(st.Input, "dry-run") {
 		b.WriteString("Dry-run complete — no resources were created.\n")
 	}
 	st.Output = b.String()
@@ -573,7 +573,7 @@ func skipOfferGhAction(s *store) func(st *registry.State) bool {
 func offerGhActionChoiceStep(_ context.Context, st *registry.State) error {
 	if st.Input.Get("offer-gh-action") != "" {
 		// Already answered (e.g. by flag or by an earlier round).
-		if !asBool(st.Input.Get("offer-gh-action")) {
+		if !inputBool(st.Input, "offer-gh-action") {
 			st.Output = "Skipped GitHub Actions setup. Run " +
 				"`lightsailctl app enable-gh-action` later to set it up."
 		}
@@ -583,7 +583,7 @@ func offerGhActionChoiceStep(_ context.Context, st *registry.State) error {
 		Reason: "Set up a GitHub Actions workflow so pushes auto-deploy?",
 		Fields: []registry.Field{
 			{Flag: "offer-gh-action", Required: true,
-				Help: "opt in to CI setup",
+				Help: "opt in to CI setup", Kind: registry.KindBool,
 				Suggest: yesNoSuggest(
 					"I'll do this later",
 					"walk me through it"),
@@ -596,7 +596,7 @@ func offerGhActionChoiceStep(_ context.Context, st *registry.State) error {
 // or never reached the offer step. All GitHub-Actions work steps use
 // this as their base skip condition.
 func skipUnlessOptedIntoCI(st *registry.State) bool {
-	return !asBool(st.Input.Get("offer-gh-action"))
+	return !inputBool(st.Input, "offer-gh-action")
 }
 
 // skipCIFetchRepo skips the repo-metadata fetch when the user declined
@@ -640,7 +640,7 @@ func skipCIProvisionIAM(st *registry.State) bool {
 	if skipUnlessOptedIntoCI(st) {
 		return true
 	}
-	if st.Input.Get("iam-confirm") != "" && !asBool(st.Input.Get("iam-confirm")) {
+	if st.Input.Get("iam-confirm") != "" && !inputBool(st.Input, "iam-confirm") {
 		return true
 	}
 	return skipRoleProvisioning(st)
@@ -654,7 +654,7 @@ func skipCIWriteWorkflow(st *registry.State) bool {
 	if skipUnlessOptedIntoCI(st) {
 		return true
 	}
-	if st.Input.Get("iam-confirm") != "" && !asBool(st.Input.Get("iam-confirm")) {
+	if st.Input.Get("iam-confirm") != "" && !inputBool(st.Input, "iam-confirm") {
 		return true
 	}
 	return skipIfSkipWorkflow(st)
@@ -670,7 +670,7 @@ func skipCIWriteWorkflow(st *registry.State) bool {
 func confirmIAMCreateStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		if st.Input.Get("iam-confirm") != "" {
-			if !asBool(st.Input.Get("iam-confirm")) {
+			if !inputBool(st.Input, "iam-confirm") {
 				return fmt.Errorf("IAM role creation declined by user")
 			}
 			return nil
@@ -694,7 +694,7 @@ func confirmIAMCreateStep(s *store) func(context.Context, *registry.State) error
 			Reason: b.String(),
 			Fields: []registry.Field{
 				{Flag: "iam-confirm", Required: true,
-					Help: "create this IAM role + trust policy",
+					Help: "create this IAM role + trust policy", Kind: registry.KindBool,
 					Suggest: yesNoSuggest(
 						"show me the JSON and stop here",
 						"create the role"),
@@ -725,6 +725,14 @@ func asBool(v string) bool {
 		return true
 	}
 	return false
+}
+
+func inputBool(in registry.Input, key string) bool {
+	v, err := in.Bool(key)
+	if err == nil {
+		return v
+	}
+	return asBool(in.Get(key))
 }
 
 // Unused plumbing reference so `lightsail` import isn't culled if

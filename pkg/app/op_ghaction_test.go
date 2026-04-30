@@ -114,6 +114,68 @@ func TestAsBool_Table(t *testing.T) {
 	}
 }
 
+func TestGhActionTypedFieldKinds(t *testing.T) {
+	enable := enableGhActionOp(&store{}, nil)
+	for _, flag := range []string{"skip-role-create", "skip-workflow", "dry-run"} {
+		t.Run("enable/"+flag, func(t *testing.T) {
+			f := fieldByFlag(t, enable.Fields, flag)
+			if f.Kind != registry.KindBool {
+				t.Fatalf("%s kind = %v; want %v", flag, f.Kind, registry.KindBool)
+			}
+		})
+	}
+
+	disable := disableGhActionOp(&store{}, nil)
+	f := fieldByFlag(t, disable.Fields, "skip-workflow")
+	if f.Kind != registry.KindBool {
+		t.Fatalf("disable skip-workflow kind = %v; want %v", f.Kind, registry.KindBool)
+	}
+}
+
+func TestOfferGhActionNeedInputIsTypedBool(t *testing.T) {
+	st := &registry.State{Input: registry.Input{}, Data: map[string]any{}}
+	err := offerGhActionChoiceStep(context.Background(), st)
+	need, ok := err.(*registry.NeedInput)
+	if !ok {
+		t.Fatalf("err = %T %[1]v; want *registry.NeedInput", err)
+	}
+	if len(need.Fields) != 1 || need.Fields[0].Flag != "offer-gh-action" {
+		t.Fatalf("need fields = %+v; want offer-gh-action", need.Fields)
+	}
+	if need.Fields[0].Kind != registry.KindBool {
+		t.Fatalf("offer-gh-action kind = %v; want %v", need.Fields[0].Kind, registry.KindBool)
+	}
+}
+
+func TestConfirmIAMCreateNeedInputIsTypedBool(t *testing.T) {
+	st := &registry.State{
+		Input: registry.Input{},
+		Data: map[string]any{
+			"acct":          "111111111111",
+			"iam.role_name": "lightsailctl-deploy-alice-hello-dev",
+			"iam.trust":     "{}",
+			"iam.perm":      "{}",
+		},
+	}
+	err := confirmIAMCreateStep(&store{})(context.Background(), st)
+	need, ok := err.(*registry.NeedInput)
+	if !ok {
+		t.Fatalf("err = %T %[1]v; want *registry.NeedInput", err)
+	}
+	if len(need.Fields) != 1 || need.Fields[0].Flag != "iam-confirm" {
+		t.Fatalf("need fields = %+v; want iam-confirm", need.Fields)
+	}
+	if need.Fields[0].Kind != registry.KindBool {
+		t.Fatalf("iam-confirm kind = %v; want %v", need.Fields[0].Kind, registry.KindBool)
+	}
+}
+
+func TestInputBoolPreservesLegacyTruthyValues(t *testing.T) {
+	if !inputBool(registry.Input{"dry-run": "yes"}, "dry-run") {
+		t.Fatal("inputBool should preserve legacy yes=true behavior")
+	}
+}
+
 // TestWriteWorkflowStep_DryRun verifies that --dry-run writes the
 // rendered workflow to st.Output without touching the filesystem.
 func TestWriteWorkflowStep_DryRun(t *testing.T) {
