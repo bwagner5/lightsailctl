@@ -33,7 +33,7 @@ const Filename = "lightsail.conf"
 type Config struct {
 	App       string   `yaml:"app"`
 	Env       string   `yaml:"env"`
-	Region    string   `yaml:"region"`
+	Region    string   `yaml:"region,omitempty"`
 	Instance  string   `yaml:"instance,omitempty"`
 	AgentPath string   `yaml:"agent-path,omitempty"`
 	Ignore    []string `yaml:"ignore,omitempty"`

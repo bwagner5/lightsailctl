@@ -85,41 +85,83 @@ func CachePath(baseDir, version string) string {
 // Resolve returns a path to a linux/amd64 lightsailctl binary suitable
 // for scp-ing to an instance. Behavior:
 //
-//   - If explicit is non-empty, return it as-is after a stat+size check.
-//     The file is expected to be the raw ELF binary — we don't try to
-//     inspect or convert.
-//   - Otherwise, use the cache under cacheBase keyed by version. If the
-//     cache has the file already, return its path. If not, download the
-//     corresponding tarball from GitHub, extract the `lightsailctl`
-//     entry into the cache path, and return it.
+//  1. If explicit is non-empty, stat+size check it and return as-is.
+//  2. Else check the per-version cache under cacheBase.
+//  3. Else look for a locally-built binary in the well-known dev
+//     locations (./dist/lightsailctl_linux_amd64_v1/lightsailctl and
+//     ./lightsailctl_linux_amd64). Lets contributors run `make
+//     snapshot` and deploy without hitting GitHub.
+//  4. Else download from GitHub and cache.
 //
 // The returned path is always absolute and guaranteed to exist.
 func Resolve(ctx context.Context, explicit, version, cacheBase string) (string, error) {
 	if explicit != "" {
-		fi, err := os.Stat(explicit)
-		if err != nil {
-			return "", fmt.Errorf("agent binary not found at %s: %w", explicit, err)
-		}
-		if fi.IsDir() || fi.Size() == 0 {
-			return "", fmt.Errorf("agent binary at %s is not a regular file", explicit)
-		}
-		abs, _ := filepath.Abs(explicit)
-		return abs, nil
+		return statAgentBinary(explicit)
 	}
 
 	target := CachePath(cacheBase, version)
 	if fi, err := os.Stat(target); err == nil && !fi.IsDir() && fi.Size() > 0 {
 		return target, nil
 	}
+
+	// Look for a locally-built linux/amd64 binary before hitting
+	// the network. Each well-known path is checked once; the first
+	// hit wins. Dev workflows (`make snapshot`, manual
+	// `GOOS=linux GOARCH=amd64 go build`) tend to land here.
+	for _, p := range localAgentCandidates() {
+		if p, err := statAgentBinary(p); err == nil {
+			return p, nil
+		}
+	}
+
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return "", err
 	}
 
 	url := LinuxAMD64AssetURL(version)
 	if err := downloadAndExtract(ctx, url, target); err != nil {
-		return "", fmt.Errorf("fetch agent binary from %s: %w", url, err)
+		return "", fmt.Errorf("could not obtain a linux/amd64 lightsailctl binary:\n"+
+			"  download: %w\n\n"+
+			"To proceed:\n"+
+			"  • pass --agent-path /path/to/linux/amd64/lightsailctl, OR\n"+
+			"  • build one locally:\n"+
+			"      GOOS=linux GOARCH=amd64 go build -o ./lightsailctl_linux_amd64 .", err)
 	}
 	return target, nil
+}
+
+// statAgentBinary validates path points at a regular, non-empty file
+// and returns its absolute path. Shared between the explicit-path and
+// local-candidate branches so the "not a regular file" / "empty file"
+// rejection is identical.
+func statAgentBinary(path string) (string, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("agent binary not found at %s: %w", path, err)
+	}
+	if fi.IsDir() || fi.Size() == 0 {
+		return "", fmt.Errorf("agent binary at %s is not a regular file", path)
+	}
+	abs, _ := filepath.Abs(path)
+	return abs, nil
+}
+
+// localAgentCandidates returns candidate paths for a locally-built
+// linux/amd64 lightsailctl binary, ordered from most-specific to
+// least-specific. All are evaluated relative to the current working
+// directory. Missing paths are silently ignored by the caller.
+func localAgentCandidates() []string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+	return []string{
+		// goreleaser's default snapshot/release layout.
+		filepath.Join(cwd, "dist", "lightsailctl_linux_amd64_v1", "lightsailctl"),
+		// Hand-rolled cross-compile output.
+		filepath.Join(cwd, "lightsailctl_linux_amd64"),
+		filepath.Join(cwd, "lightsailctl-linux-amd64"),
+	}
 }
 
 // downloadAndExtract pulls the linux/amd64 tarball from url and
