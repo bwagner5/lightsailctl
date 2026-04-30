@@ -329,11 +329,13 @@ func Resource(region *string, regionHints []string) registry.Resource {
 		Fields:  fields,
 		Store:   st,
 		Operations: map[string]registry.Operation{
-			"create": createOp(st),
-			"status": statusOp(st, suggest),
-			"delete": deleteOp(st, suggest),
-			"deploy": deployOp(st),
-			"logs":   logsOp(st, suggest),
+			"create":            createOp(st),
+			"status":            statusOp(st, suggest),
+			"delete":            deleteOp(st, suggest),
+			"deploy":            deployOp(st),
+			"logs":              logsOp(st, suggest),
+			"enable-gh-action":  enableGhActionOp(st, suggest),
+			"disable-gh-action": disableGhActionOp(st, suggest),
 		},
 	}
 }

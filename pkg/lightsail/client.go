@@ -92,6 +92,12 @@ func NewWithOptions(ctx context.Context, opts Options) (*Client, error) {
 // (not pinned to any particular region).
 func (c *Client) Region() string { return c.cfg.Region }
 
+// Config returns the underlying aws.Config. Exposed so neighboring
+// packages can build additional SDK service clients (e.g. iam for the
+// GitHub-OIDC flow) without re-loading AWS config from the environment.
+// Callers should treat the returned value as read-only.
+func (c *Client) Config() aws.Config { return c.cfg }
+
 // WithRegion returns a copy of Client pinned to the given region. Safe to
 // call with "" to get a (still-global) copy.
 func (c *Client) WithRegion(region string) *Client {
