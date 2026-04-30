@@ -4,10 +4,11 @@
 package compose
 
 import (
-	"bufio"
 	"os"
 	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // DefaultPaths are the filenames we look for, in order, in the working dir.
@@ -38,30 +39,77 @@ func ParsePorts(path string) ([]int, error) {
 	}
 	defer func() { _ = f.Close() }()
 
+	var doc yaml.Node
+	if err := yaml.NewDecoder(f).Decode(&doc); err != nil {
+		return nil, err
+	}
+
+	root := documentRoot(&doc)
+	services := mappingValue(root, "services")
+	if services == nil || services.Kind != yaml.MappingNode {
+		return nil, nil
+	}
+
 	seen := map[int]bool{}
 	var ports []int
-	inPorts := false
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		trimmed := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(trimmed, "ports:") {
-			inPorts = true
+	for i := 0; i+1 < len(services.Content); i += 2 {
+		service := services.Content[i+1]
+		if service.Kind != yaml.MappingNode {
 			continue
 		}
-		if inPorts {
-			if !strings.HasPrefix(trimmed, "-") {
-				inPorts = false
+		portList := mappingValue(service, "ports")
+		if portList == nil || portList.Kind != yaml.SequenceNode {
+			continue
+		}
+		for _, item := range portList.Content {
+			p := portNode(item)
+			if p <= 0 || seen[p] {
 				continue
 			}
-			p := hostPort(strings.TrimPrefix(trimmed, "-"))
-			if p > 0 && !seen[p] {
-				seen[p] = true
-				ports = append(ports, p)
-			}
+			seen[p] = true
+			ports = append(ports, p)
 		}
 	}
-	return ports, scanner.Err()
+	return ports, nil
+}
+
+func documentRoot(n *yaml.Node) *yaml.Node {
+	if n == nil {
+		return nil
+	}
+	if n.Kind == yaml.DocumentNode && len(n.Content) > 0 {
+		return n.Content[0]
+	}
+	return n
+}
+
+func mappingValue(n *yaml.Node, key string) *yaml.Node {
+	if n == nil || n.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Value == key {
+			return n.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func portNode(n *yaml.Node) int {
+	if n == nil {
+		return 0
+	}
+	switch n.Kind {
+	case yaml.ScalarNode:
+		return hostPort(n.Value)
+	case yaml.MappingNode:
+		if published := mappingValue(n, "published"); published != nil {
+			return hostPort(published.Value)
+		}
+		return 0
+	default:
+		return 0
+	}
 }
 
 // hostPort extracts the host-side port from a compose port string.
