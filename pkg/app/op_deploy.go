@@ -11,6 +11,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/aws/lightsailctl/internal"
+	"github.com/aws/lightsailctl/pkg/agentfetch"
 	"github.com/aws/lightsailctl/pkg/compose"
 	"github.com/aws/lightsailctl/pkg/config"
 	"github.com/aws/lightsailctl/pkg/deploy"
@@ -53,8 +55,8 @@ func deployOp(s *store) registry.Operation {
 			// no instances exist globally.
 			{Flag: "create-new-instance", Help: "create a new Lightsail instance as part of deploy",
 				Default: "false", Wizard: registry.BoolPtr(false)},
-			{Flag: "agent-path", Help: "lightsailctl binary to scp to the instance (linux/amd64)",
-				Required: true, File: true},
+			{Flag: "agent-path", Help: "lightsailctl binary to scp to the instance (linux/amd64); auto-fetched from the matching release when unset",
+				File: true},
 			{Flag: "region", Help: "AWS region (auto-filled from --instance)",
 				Wizard: registry.BoolPtr(false)},
 			{Flag: "wait-timeout", Help: "how long to wait for healthy", Default: "3m",
@@ -85,7 +87,7 @@ func deployOp(s *store) registry.Operation {
 			{Label: "Resolve region from instance", Do: resolveRegionFromInstanceStep(s), Skip: skipIfRegionSet, Undo: unpinStoreStep(s)},
 			{Label: "Create lightsail.conf", Do: saveConfigStep, Skip: skipIfConfDetected},
 			{Label: "Check app exists (create if missing)", Do: ensureAppStep(s), Undo: unpinStoreStep(s)},
-			{Label: "Verify agent binary", Do: verifyAgentStep, Skip: skipIfAppExists},
+			{Label: "Resolve agent binary", Do: resolveAgentStep, Skip: skipIfAppExists},
 			{Label: "Create app-config bucket", Do: createAppBucketStep(s), Skip: skipIfAppExists},
 			{Label: "Create env bucket", Do: createEnvBucketStep(s), Skip: skipIfAppExists},
 			{Label: "Tag target instance", Do: tagInstanceStep(s), Skip: skipIfAppExists},
@@ -394,11 +396,34 @@ func preloadFromConf(_ context.Context, in registry.Input) error {
 func detectConfStep(_ context.Context, st *registry.State) error {
 	cfg, _ := config.LoadFromCwd()
 	existed := cfg != nil
+	// agent-path is no longer required in conf — deploy auto-fetches
+	// the matching release binary when unset. See resolveAgentStep.
 	complete := existed &&
 		cfg.App != "" && cfg.Env != "" &&
-		cfg.Region != "" && cfg.Instance != "" && cfg.AgentPath != ""
+		cfg.Region != "" && cfg.Instance != ""
 	st.Data["conf_existed"] = existed
 	st.Data["conf_complete"] = complete
+	return nil
+}
+
+// resolveAgentStep resolves the linux/amd64 lightsailctl binary that
+// will be scp'd to the instance on a bootstrap deploy. Two paths:
+//
+//   - --agent-path set (or conf's agent-path set): stat it; use as-is.
+//   - unset: download the matching release from GitHub, cache under
+//     the user's cache dir keyed by version, and use the cached copy.
+//
+// On success, the resolved absolute path is written back into
+// Input["agent-path"] so the downstream scpAgentStep (which existed
+// before this behavior shipped) continues to work unchanged.
+func resolveAgentStep(ctx context.Context, st *registry.State) error {
+	explicit := st.Input.Get("agent-path")
+	version := internal.Version().String()
+	resolved, err := agentfetch.Resolve(ctx, explicit, version, agentfetch.UserCacheDir())
+	if err != nil {
+		return err
+	}
+	st.Input["agent-path"] = resolved
 	return nil
 }
 
