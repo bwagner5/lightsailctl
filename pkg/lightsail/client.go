@@ -62,7 +62,19 @@ func New(ctx context.Context, region string) (*Client, error) {
 
 // NewWithOptions is the full constructor.
 func NewWithOptions(ctx context.Context, opts Options) (*Client, error) {
-	awsOpts := []func(*config.LoadOptions) error{}
+	awsOpts := []func(*config.LoadOptions) error{
+		// Transient-failure resilience. Default is 3 attempts with a
+		// standard retryer, which is fine for steady-state calls but
+		// too stingy for flaky ISPs / corporate proxies / cold-path
+		// Lightsail endpoints where we've seen connection-level EOF
+		// on CreateInstances. Adaptive mode adds client-side rate
+		// limiting on top of the standard retry policy so a burst of
+		// throttling responses gets self-throttled rather than
+		// exhausting the retry budget. 10 attempts + ~30s ceiling
+		// gives plenty of headroom without hanging forever.
+		config.WithRetryMode(aws.RetryModeAdaptive),
+		config.WithRetryMaxAttempts(10),
+	}
 	if opts.Region != "" {
 		awsOpts = append(awsOpts, config.WithRegion(opts.Region))
 	}
