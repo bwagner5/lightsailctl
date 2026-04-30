@@ -4,17 +4,24 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bwagner5/triad/pkg/registry"
 
 	"github.com/aws/lightsailctl/pkg/config"
+	"github.com/aws/lightsailctl/pkg/ghaction"
+	"github.com/aws/lightsailctl/pkg/iamoidc"
 	"github.com/aws/lightsailctl/pkg/lightsail"
 )
 
-// deleteOp: tear down an app. In Phase 1 this is:
+// deleteOp: tear down an app. Phases:
 //  1. Untag all instances targeting the app
 //  2. Reset firewall on any newly-unused instance
 //  3. Delete all env buckets + the app-config bucket
+//  4. Delete any CI IAM role(s) `enable-gh-action` provisioned for this app
+//  5. Remove the local GitHub Actions workflow file
+//  6. Remove the local lightsail.conf
 //
 // Phase 5 will add a step-0 that runs `lightsailctl app local down` over SSH
 // on each target to cleanly tear down containers.
@@ -22,7 +29,7 @@ func deleteOp(s *store, suggest func(context.Context) ([]registry.Choice, error)
 	return registry.Operation{
 		Name: "delete", Aliases: []string{"rm"}, Key: "ctrl+d",
 		Short:   "delete an app and all its buckets",
-		Confirm: "Delete this app? All environments, buckets, and status files will be removed.",
+		Confirm: "Delete this app? All environments, buckets, CI roles, and status files will be removed.",
 		Fields: []registry.Field{
 			{Flag: "name", Short: "n", Help: "app name", Required: true, Suggest: suggest},
 		},
@@ -33,6 +40,9 @@ func deleteOp(s *store, suggest func(context.Context) ([]registry.Choice, error)
 			{Label: "List app buckets", Do: listBucketsForDeleteStep(s)},
 			{Label: "Delete env buckets", Do: deleteEnvBucketsStep(s), Skip: skipIfNoEnvBuckets},
 			{Label: "Delete app-config bucket", Do: deleteAppConfigBucketStep(s), Skip: skipIfNoAppConfigBucket},
+			{Label: "Discover CI IAM roles", Do: discoverCIRolesStep(s)},
+			{Label: "Delete CI IAM roles", Do: deleteCIRolesStep(s), Skip: skipIfNoCIRoles},
+			{Label: "Remove local GitHub Actions workflow", Do: removeLocalWorkflowStep, Skip: skipIfNoLocalWorkflow},
 			{Label: "Remove local lightsail.conf", Do: removeLocalConfStep, Skip: skipIfNoMatchingLocalConf},
 		},
 	}
@@ -214,4 +224,132 @@ func skipIfNoMatchingLocalConf(st *registry.State) bool {
 		return true
 	}
 	return cfg.App != st.Input.Get("name")
+}
+
+// ── CI teardown (IAM role + local workflow file) ─────────────────────
+
+// discoverCIRolesStep lists the IAM role(s) tagged
+// lightsailctl:app=<name>. Stashes the names on st.Data for
+// deleteCIRolesStep. Best-effort: IAM listing failures are logged via
+// st.Output but don't block the rest of the teardown.
+func discoverCIRolesStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			// No AWS client yet: skip gracefully.
+			st.Data["ci_roles"] = []string(nil)
+			return nil
+		}
+		iamClient := iamoidc.NewIAMClient(c.Config())
+		p := iamoidc.Provisioner{IAM: iamClient}
+		roles, err := p.FindRolesForApp(ctx, st.Input.Get("name"))
+		if err != nil {
+			// Non-fatal: a user without iam:ListRoles still gets the
+			// rest of delete. Record the hint for the summary.
+			st.Data["ci_roles"] = []string(nil)
+			st.Output = "Skipped IAM role discovery: " + err.Error()
+			return nil
+		}
+		st.Data["ci_roles"] = roles
+		if len(roles) > 0 {
+			var b strings.Builder
+			fmt.Fprintf(&b, "Found %d CI role(s) tagged for this app:", len(roles))
+			for _, r := range roles {
+				b.WriteString("\n  " + r)
+			}
+			st.Output = b.String()
+		}
+		return nil
+	}
+}
+
+func skipIfNoCIRoles(st *registry.State) bool {
+	roles, _ := st.Data["ci_roles"].([]string)
+	return len(roles) == 0
+}
+
+// deleteCIRolesStep detaches the inline policy and deletes every IAM
+// role discovered by discoverCIRolesStep. Idempotent: missing roles
+// are treated as success. The shared OIDC provider is NEVER deleted
+// — other apps in the same account may depend on it.
+func deleteCIRolesStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		iamClient := iamoidc.NewIAMClient(c.Config())
+		p := iamoidc.Provisioner{IAM: iamClient}
+		roles, _ := st.Data["ci_roles"].([]string)
+		var deleted []string
+		var firstErr error
+		for _, name := range roles {
+			if err := p.DeleteRole(ctx, name); err != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("delete %s: %w", name, err)
+				}
+				continue
+			}
+			deleted = append(deleted, name)
+		}
+		if len(deleted) > 0 {
+			var b strings.Builder
+			fmt.Fprintf(&b, "Deleted %d IAM role(s):", len(deleted))
+			for _, r := range deleted {
+				b.WriteString("\n  " + r)
+			}
+			st.Output = b.String()
+		}
+		return firstErr
+	}
+}
+
+// skipIfNoLocalWorkflow skips the "Remove local GitHub Actions
+// workflow" step when the file doesn't exist under the current
+// directory (or any parent). The workflow lives at a well-known
+// relative path, .github/workflows/lightsail-deploy.yml.
+func skipIfNoLocalWorkflow(st *registry.State) bool {
+	path := findLocalWorkflow()
+	return path == ""
+}
+
+// removeLocalWorkflowStep deletes the workflow file if it exists.
+// Best-effort: non-existence isn't an error, and a missing cwd is
+// tolerated.
+func removeLocalWorkflowStep(_ context.Context, st *registry.State) error {
+	path := findLocalWorkflow()
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	st.Output = "Removed " + path
+	return nil
+}
+
+// findLocalWorkflow walks up from cwd looking for a
+// .github/workflows/lightsail-deploy.yml. Returns its absolute path
+// or "". We don't validate that the file belongs to the app being
+// deleted — running `app delete` already required the user to name
+// the app explicitly, and the workflow file path itself is
+// app-neutral. A conservative future improvement would parse the
+// YAML and match its role-to-assume ARN against the deleted roles.
+func findLocalWorkflow() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	dir := cwd
+	for {
+		candidate := filepath.Join(dir, ghaction.WorkflowRelPath)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
