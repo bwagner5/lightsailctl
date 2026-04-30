@@ -127,6 +127,12 @@ func deployOp(s *store) registry.Operation {
 			{Label: "Finalize", Do: unpinStoreStep(s), Skip: func(st *registry.State) bool {
 				return st.Input.Get("no-wait") != "true"
 			}},
+			// Offer-CI tail step: only runs on a first-run deploy
+			// (conf didn't pre-exist) of a GitHub-hosted repo, and
+			// only in interactive mode. See offerGhActionStep doc.
+			{Label: "Offer GitHub Actions deploy workflow",
+				Do:   offerGhActionStep(s),
+				Skip: skipOfferGhAction(s)},
 		},
 	}
 }

@@ -45,6 +45,20 @@ type store struct {
 	region      *string
 	regionHints []string
 	client      *lightsail.Client
+	// nonInteractive is a pointer to the CLI's -y / --no-interactive
+	// flag state, plumbed from main.go. The offer-CI tail step on
+	// deploy reads it to know whether it's safe to prompt. Nil =
+	// treated as interactive (legacy constructor compatibility).
+	nonInteractive *bool
+}
+
+// Interactive reports whether the CLI is currently running with a
+// user attached (i.e. not -y). Safe to call with a nil pointer.
+func (s *store) Interactive() bool {
+	if s.nonInteractive == nil {
+		return true
+	}
+	return !*s.nonInteractive
 }
 
 func (s *store) currentRegion() string {
@@ -298,7 +312,19 @@ func sortedCSV(csv string) string {
 //
 // The client is built lazily on first Store call so `--help` / `--version`
 // and offline TUI launches never touch AWS config.
+// Resource builds the triad Resource. See ResourceWithOptions for the
+// full-featured constructor; this thin wrapper keeps the legacy
+// positional-args shape working.
 func Resource(region *string, regionHints []string) registry.Resource {
+	return ResourceWithOptions(region, regionHints, nil)
+}
+
+// ResourceWithOptions is the full constructor. nonInteractive is a
+// pointer to the caller's -y / --no-interactive flag state. When set
+// and true, the deploy saga's offer-CI tail step is skipped — we
+// don't silently provision IAM for an unattended session. Passing nil
+// is equivalent to "always interactive".
+func ResourceWithOptions(region *string, regionHints []string, nonInteractive *bool) registry.Resource {
 	fields := []registry.Field{
 		{Name: "Name", Flag: "name", Short: "n", Help: "application name",
 			Prefill: names.DefaultAppName, Table: registry.TableHint{Header: "NAME"}},
@@ -319,7 +345,7 @@ func Resource(region *string, regionHints []string) registry.Resource {
 		{Name: "Endpoints", Flag: "endpoints", Help: "live endpoints",
 			Table: registry.TableHint{Header: "ENDPOINTS", Wide: true}},
 	}
-	st := &store{region: region, regionHints: regionHints}
+	st := &store{region: region, regionHints: regionHints, nonInteractive: nonInteractive}
 	suggest := registry.SuggestFrom(st, fields, "name")
 	return registry.Resource{
 		Name:    "app",

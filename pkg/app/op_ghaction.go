@@ -518,7 +518,108 @@ func removeWorkflowStep(_ context.Context, st *registry.State) error {
 	return nil
 }
 
-// ── small helpers ────────────────────────────────────────────────────
+// ── offer-CI tail step (invoked from op_deploy) ──────────────────────
+//
+// The deploy saga appends this as its final step. It runs only on a
+// first-run bootstrap deploy (conf didn't pre-exist) of a GitHub-hosted
+// repo, and only in interactive mode. The plan forbids silently
+// provisioning IAM under -y.
+
+// skipOfferGhAction returns true when the offer-CI tail step should
+// not run. The gate is strict: any of the following → skip.
+//
+//   1. non-interactive (-y): we don't prompt, and silently
+//      provisioning IAM against the user's account without explicit
+//      opt-in is a non-starter.
+//   2. lightsail.conf pre-existed: this isn't the first-run path.
+//   3. no GitHub remote: the workflow generator is github.com-only.
+func skipOfferGhAction(s *store) func(st *registry.State) bool {
+	return func(st *registry.State) bool {
+		if !s.Interactive() {
+			return true
+		}
+		existed, _ := st.Data["conf_existed"].(bool)
+		if existed {
+			return true
+		}
+		cwd, err := os.Getwd()
+		if err != nil {
+			return true
+		}
+		raw, _ := ghaction.DetectRemoteURL(cwd)
+		if raw == "" {
+			return true
+		}
+		if _, perr := ghaction.ParseRemoteURL(raw); perr != nil {
+			return true
+		}
+		return false
+	}
+}
+
+// offerGhActionStep prompts the user once to opt into CI setup. On
+// yes, runs the shared enable-gh-action steps inline against the same
+// saga state. On no, does nothing and the deploy completes normally.
+//
+// The field name "offer-gh-action" is namespaced to this step so it
+// doesn't collide with the enable-gh-action op's own fields.
+func offerGhActionStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		// First visit: ask yes/no.
+		if st.Input.Get("offer-gh-action") == "" {
+			return &registry.NeedInput{
+				Reason: "Set up a GitHub Actions workflow so pushes auto-deploy?",
+				Fields: []registry.Field{
+					{Flag: "offer-gh-action", Required: true,
+						Help: "opt in to CI setup",
+						Suggest: yesNoSuggest(
+							"No, I'll do this later",
+							"Yes, walk me through it"),
+					},
+				},
+			}
+		}
+		if !asBool(st.Input.Get("offer-gh-action")) {
+			st.Output = "Skipped GitHub Actions setup. Run " +
+				"`lightsailctl app enable-gh-action` later to set it up."
+			return nil
+		}
+
+		// Yes path: run the enable-gh-action saga inline. We reuse
+		// the same step funcs so behavior stays in sync — this is
+		// explicitly the plan's "same shared saga" contract.
+		//
+		// Each sub-step may return NeedInput; we let that bubble up,
+		// which makes the runtime pause the deploy saga at this
+		// parent step and prompt the user. On the retry, the
+		// question that was asked has been answered and we make
+		// progress to the next sub-step. That's safe here because
+		// each sub-step is itself idempotent.
+		substeps := []struct {
+			label string
+			skip  func(*registry.State) bool
+			do    func(context.Context, *registry.State) error
+		}{
+			{"Detect git remote", nil, detectRemoteStep},
+			{"Resolve GitHub token", nil, resolveGhTokenStep},
+			{"Fetch repo metadata", skipIfDetachedFromGitHub, fetchRepoStep},
+			{"Build IAM policies", nil, buildPoliciesStep(s)},
+			{"Ensure OIDC provider", skipRoleProvisioning, ensureProviderStep(s)},
+			{"Ensure role + inline policy", skipRoleProvisioning, ensureRoleStep(s)},
+			{"Write workflow file", skipIfSkipWorkflow, writeWorkflowStep},
+			{"Summary", nil, enableSummaryStep},
+		}
+		for _, sub := range substeps {
+			if sub.skip != nil && sub.skip(st) {
+				continue
+			}
+			if err := sub.do(ctx, st); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
 
 // asBool is a lenient bool parser used on Input values. Treats the
 // common "yes/1/true" family as true; everything else (including empty)

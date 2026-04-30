@@ -63,7 +63,9 @@ func Run(ctx context.Context, args []string, getenv func(string) string, stdout,
 
 	g := &cli.Globals{Getenv: getenv}
 	reg := registry.New()
-	reg.Register(app.Resource(&region, regionHints))
+	// Pass &g.NonInteractive so the deploy saga's first-run "offer CI"
+	// tail step can skip itself under -y. See ResourceWithOptions.
+	reg.Register(app.ResourceWithOptions(&region, regionHints, &g.NonInteractive))
 	reg.Register(instance.Resource(&region, regionHints))
 
 	root := cli.Build(cliName, "Amazon Lightsail CLI", reg, g)
