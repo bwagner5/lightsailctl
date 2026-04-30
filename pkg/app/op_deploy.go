@@ -85,6 +85,7 @@ func deployOp(s *store) registry.Operation {
 			// created one.
 			{Label: "Pick target instance", Do: pickExistingInstanceStep(s), Skip: skipIfCreatingNewInstance},
 			{Label: "Resolve region from instance", Do: resolveRegionFromInstanceStep(s), Skip: skipIfRegionSet, Undo: unpinStoreStep(s)},
+			{Label: "Review & confirm", Do: confirmDeployStep(s), Skip: skipConfirm(s)},
 			{Label: "Create lightsail.conf", Do: saveConfigStep, Skip: skipIfConfDetected},
 			{Label: "Check app exists (create if missing)", Do: ensureAppStep(s), Undo: unpinStoreStep(s)},
 			{Label: "Resolve agent binary", Do: resolveAgentStep, Skip: skipIfAppExists},
