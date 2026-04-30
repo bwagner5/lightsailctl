@@ -33,12 +33,12 @@ func createOp(s *Store) registry.Operation {
 func CreateFields(s *Store) []registry.Field {
 	bpType := "os"           // shared: blueprint-type → blueprint filtering
 	platform := "LINUX_UNIX" // shared: blueprint → bundle filtering
-	bpSuggest, bpValidate := blueprintSuggestAndValidate(s, &bpType, &platform)
+	bpSuggest, bpValidate := BlueprintSuggestAndValidate(s, &bpType, &platform)
 	return []registry.Field{
 		{Flag: "name", Short: "n", Help: "instance name", Required: true,
 			Prefill: names.Random, Validate: names.ValidateLabel},
 		{Flag: "region", Short: "r", Help: "AWS region", Required: true,
-			Default: "us-east-1", Suggest: regionSuggest(s)},
+			Default: "us-east-1", Suggest: RegionSuggest(s)},
 		{Flag: "blueprint-type", Help: "blueprint category", Default: "os",
 			Suggest: func(_ context.Context) ([]registry.Choice, error) {
 				return []registry.Choice{
@@ -53,7 +53,7 @@ func CreateFields(s *Store) []registry.Field {
 		{Flag: "blueprint", Short: "b", Help: "OS / image", Required: true,
 			Default: "amazon_linux_2023", Suggest: bpSuggest, Validate: bpValidate},
 		{Flag: "bundle", Help: "instance size", Required: true,
-			Default: "micro_x_x", Suggest: bundleSuggest(s, &platform)},
+			Default: "micro_x_x", Suggest: BundleSuggest(s, &platform)},
 		{Flag: "ip-address-type", Help: "networking stack", Default: "dualstack",
 			Suggest: func(_ context.Context) ([]registry.Choice, error) {
 				return []registry.Choice{
@@ -83,7 +83,7 @@ func CreateStep(s *Store) registry.Step {
 // the live region list via Client.Regions (disk-cached; snapshot
 // fallback if offline), sorts and column-aligns it into triad.Choices
 // matching the old output layout.
-func regionSuggest(s *Store) func(context.Context) ([]registry.Choice, error) {
+func RegionSuggest(s *Store) func(context.Context) ([]registry.Choice, error) {
 	return func(ctx context.Context) ([]registry.Choice, error) {
 		c, err := s.ensure(ctx)
 		if err != nil {
@@ -113,7 +113,7 @@ func regionSuggest(s *Store) func(context.Context) ([]registry.Choice, error) {
 	}
 }
 
-func blueprintSuggestAndValidate(s *Store, bpType, platform *string) (func(context.Context) ([]registry.Choice, error), func(string) error) {
+func BlueprintSuggestAndValidate(s *Store, bpType, platform *string) (func(context.Context) ([]registry.Choice, error), func(string) error) {
 	var cached []lightsail.Blueprint
 	suggest := func(ctx context.Context) ([]registry.Choice, error) {
 		c, err := s.ensure(ctx)
@@ -155,7 +155,7 @@ func blueprintSuggestAndValidate(s *Store, bpType, platform *string) (func(conte
 	return suggest, validate
 }
 
-func bundleSuggest(s *Store, platform *string) func(context.Context) ([]registry.Choice, error) {
+func BundleSuggest(s *Store, platform *string) func(context.Context) ([]registry.Choice, error) {
 	return func(ctx context.Context) ([]registry.Choice, error) {
 		c, err := s.ensure(ctx)
 		if err != nil {

@@ -29,36 +29,122 @@ import (
 // the app in-place. When no target instance is configured (and none was
 // given on the CLI), the saga offers to create a new Lightsail instance
 // inline — see pickInstanceStrategyStep / createNewInstanceStep.
+// deployOp implements `lightsailctl app deploy` / `lightsailctl deploy`.
+//
+// All interactive inputs — app / env / instance strategy / new-instance
+// details / review-confirm — are collected up front by the CLI's
+// in-built wizard as a single continuous flow. The saga steps below
+// assume Input is fully resolved and do no mid-flight NeedInput round
+// trips, so the user sees one coherent progress view rather than a
+// flashing mix of wizard + progress-bar frames.
+//
+// Non-interactive callers (-y) populate the fields via flags; defaults
+// handle the rest.
 func deployOp(s *store) registry.Operation {
+	// Shared state used by new-instance field closures. These pointers
+	// capture the user's selections so blueprint/bundle suggestions can
+	// filter appropriately. Reallocated per call to deployOp so the
+	// closure state isn't shared across invocations.
+	var (
+		niStore    = instance.NewStore(s.region, s.regionHints)
+		niBpType   = "os"
+		niPlatform = "LINUX_UNIX"
+	)
+	niBpSuggest, niBpValidate := niBlueprintSuggestAndValidate(niStore, &niBpType, &niPlatform)
+
+	// Predicates used as Field.When values. Keep them as named vars so
+	// the field list below stays readable.
+	wantsNew := func(in registry.Input) bool {
+		return asBool(in.Get("create-new-instance"))
+	}
+	wantsExisting := func(in registry.Input) bool {
+		return !asBool(in.Get("create-new-instance")) && in.Get("instance") == ""
+	}
+	askStrategy := func(in registry.Input) bool {
+		// Only prompt the yes/no when conf/flag didn't already name
+		// an instance. If --instance is set we go straight to the
+		// existing-instance flow.
+		return in.Get("instance") == ""
+	}
+
 	return registry.Operation{
 		Name: "deploy", Key: "d", Short: "deploy current dir to an app/env",
 		Fields: []registry.Field{
-			// Fields collected up front on a single wizard screen.
-			// Pre (below) hydrates from lightsail.conf so an existing
-			// conf skips the wizard entirely. Fields still empty after
-			// Pre are prompted as usual.
-			{Flag: "name", Short: "n", Help: "app name", Required: true,
-				Prefill: names.DefaultAppName, Validate: names.ValidateLabel},
-			{Flag: "env", Short: "e", Help: "environment", Default: "dev", Required: true, Validate: names.ValidateLabel},
-			// "instance" stays on the op so the CLI flag works for
-			// non-interactive callers, but Wizard:false hides it from
-			// the up-front wizard. pickInstanceStrategyStep +
-			// pickExistingInstanceStep prompt for it lazily via
-			// NeedInput, which lets us skip the picker entirely when
-			// the user opts to create a new instance instead.
-			{Flag: "instance", Help: "target Lightsail instance",
-				Suggest: instanceSuggest(s), Wizard: registry.BoolPtr(false)},
-			// Yes/no gate for the create-new-instance branch. Not shown
-			// in the up-front wizard — pickInstanceStrategyStep prompts
-			// for it lazily after conf detection so we can suppress the
-			// question when conf already supplies an instance or when
-			// no instances exist globally.
-			{Flag: "create-new-instance", Help: "create a new Lightsail instance as part of deploy",
-				Default: "false", Wizard: registry.BoolPtr(false)},
+			// ── Lightsail Application ────────────────────────────
+			{Flag: "name", Short: "n", Label: "App name", Help: "app name",
+				Section: "Lightsail Application",
+				Required: true, Prefill: names.DefaultAppName, Validate: names.ValidateLabel},
+			{Flag: "env", Short: "e", Label: "Environment", Help: "environment",
+				Section: "Lightsail Application",
+				Default:  "dev", Required: true, Validate: names.ValidateLabel},
+
+			// ── Deployment Target ────────────────────────────────
+			// Yes/no gate. Hidden when --instance is already set.
+			{Flag: "create-new-instance", Label: "Target", Help: "use an existing instance or create a new one",
+				Section:  "Deployment Target",
+				Required: true,
+				When:     askStrategy,
+				Suggest: yesNoSuggest(
+					"pick an existing instance",
+					"create a new instance"),
+			},
+			// Existing-instance picker: shown only when the user
+			// chose "pick existing" and didn't already name one.
+			{Flag: "instance", Label: "Lightsail instance",
+				Help:    "target Lightsail instance",
+				Section: "Deployment Target",
+				Required: true,
+				When:     wantsExisting,
+				Suggest:  instanceSuggest(s)},
+
+			// ── New Lightsail Instance ───────────────────────────
+			// All fields conditional on strategy=create-new. They
+			// mirror instance.CreateFields shape but live here so
+			// the wizard sees them up front.
+			{Flag: "__ni/name", Label: "Instance name", Help: "instance name",
+				Section: "New Lightsail Instance", Required: true, When: wantsNew,
+				Prefill: names.Random, Validate: names.ValidateLabel},
+			{Flag: "__ni/region", Label: "Region", Help: "AWS region",
+				Section: "New Lightsail Instance", Required: true, When: wantsNew,
+				Default: "us-east-1", Suggest: niRegionSuggest(niStore)},
+			{Flag: "__ni/blueprint-type", Label: "Blueprint category",
+				Help: "blueprint category", Default: "os",
+				Section: "New Lightsail Instance", When: wantsNew,
+				Suggest: niBlueprintTypeSuggest(),
+				Validate: func(v string) error { niBpType = v; return nil }},
+			{Flag: "__ni/blueprint", Label: "Blueprint", Help: "OS / image",
+				Section: "New Lightsail Instance", Required: true, When: wantsNew,
+				Default: "amazon_linux_2023", Suggest: niBpSuggest, Validate: niBpValidate},
+			{Flag: "__ni/bundle", Label: "Instance size", Help: "instance size",
+				Section: "New Lightsail Instance", Required: true, When: wantsNew,
+				Default: "micro_x_x", Suggest: niBundleSuggest(niStore, &niPlatform)},
+			{Flag: "__ni/ip-address-type", Label: "Networking",
+				Help: "networking stack", Default: "dualstack",
+				Section: "New Lightsail Instance", When: wantsNew,
+				Suggest: niIPTypeSuggest()},
+			{Flag: "__ni/user-data", Label: "Launch script", Help: "launch script",
+				Section: "New Lightsail Instance", When: wantsNew, File: true},
+			{Flag: "__ni/monitoring", Label: "Detailed monitoring",
+				Help: "detailed monitoring", Default: "false",
+				Section: "New Lightsail Instance", When: wantsNew,
+				Suggest: niMonitoringSuggest()},
+
+			// ── Review & Confirm ─────────────────────────────────
+			{Flag: "deploy-confirm", Label: "Proceed",
+				Help:         "confirm before any changes land",
+				Section:      "Review & Confirm",
+				Required:     true,
+				PreambleFunc: deploySummaryPreamble,
+				Suggest: yesNoSuggest(
+					"abort",
+					"deploy now"),
+			},
+
+			// ── Hidden fields (flags only; not prompted) ─────────
 			{Flag: "agent-path",
 				Label: "Agent binary",
 				Help:  "lightsailctl binary to scp to the instance (linux/amd64); auto-fetched from the matching release when unset",
-				File:  true},
+				File:  true, Wizard: registry.BoolPtr(false)},
 			{Flag: "region", Help: "AWS region (auto-filled from --instance)",
 				Wizard: registry.BoolPtr(false)},
 			{Flag: "wait-timeout", Help: "how long to wait for healthy", Default: "3m",
@@ -74,20 +160,14 @@ func deployOp(s *store) registry.Operation {
 				// Detect conf.
 				return detectConfStep(ctx, st)
 			}},
-			// Decide branch: use-existing (conf or picker) vs create-new.
-			// May prompt yes/no via NeedInput when instances exist and
-			// conf didn't name one.
-			{Label: "Pick instance strategy", Do: pickInstanceStrategyStep(s)},
-			// Create-new branch. Prompts for instance.CreateFields on
-			// first invocation; then runs the instance create step.
-			// Skipped entirely when strategy == use-existing.
-			{Label: "Create new Lightsail instance", Do: createNewInstanceStep(s), Skip: skipUnlessCreatingNewInstance},
-			// Use-existing branch. Prompts for instance via NeedInput
-			// (the picker was disabled up front). Skipped when we just
-			// created one.
-			{Label: "Pick target instance", Do: pickExistingInstanceStep(s), Skip: skipIfCreatingNewInstance},
+			// Configuration phase (non-interactive now): translate
+			// up-front wizard answers into saga state.
+			{Label: "Resolve deployment target", Do: applyStrategyStep(s)},
+			{Label: "Create new Lightsail instance",
+				Do:   createNewInstanceInlineStep(s),
+				Skip: skipUnlessCreatingNewInstance},
 			{Label: "Resolve region from instance", Do: resolveRegionFromInstanceStep(s), Skip: skipIfRegionSet, Undo: unpinStoreStep(s)},
-			{Label: "Review & confirm", Do: confirmDeployStep(s), Skip: skipConfirm(s)},
+			{Label: "Abort if declined", Do: abortIfDeclinedStep},
 			{Label: "Create lightsail.conf", Do: saveConfigStep, Skip: skipIfConfDetected},
 			{Label: "Check app exists (create if missing)", Do: ensureAppStep(s), Undo: unpinStoreStep(s)},
 			{Label: "Resolve agent binary", Do: resolveAgentStep, Skip: skipIfAppExists},
@@ -167,154 +247,9 @@ func unpinStoreStep(s *store) func(context.Context, *registry.State) error {
 // "strategy"  string   — "use-existing" | "create-new"
 // ─────────────────────────────────────────────────────────────────────────
 
-// pickInstanceStrategyStep decides whether deploy targets an existing
-// instance or creates one inline. Three outcomes:
-//
-//  1. Conf or --instance already named an instance → strategy
-//     "use-existing", no prompt.
-//  2. No instances exist in the account globally → strategy "create-new",
-//     no prompt (the picker would have nothing to show).
-//  3. Instances exist and the user hasn't chosen yet → prompt yes/no via
-//     NeedInput. The question is always asked in this branch, even when
-//     instances exist, so the user can opt in to a fresh one without
-//     leaving the wizard.
-//
-// The runtime retries the step after NeedInput is satisfied, at which
-// point create-new-instance is set and the branch decision can be made
-// without re-prompting.
-func pickInstanceStrategyStep(s *store) func(context.Context, *registry.State) error {
-	return func(ctx context.Context, st *registry.State) error {
-		// Short-circuit: conf or --instance already picked.
-		if st.Input.Get("instance") != "" {
-			st.Data["strategy"] = "use-existing"
-			return nil
-		}
-		c, err := s.ensure(ctx)
-		if err != nil {
-			return err
-		}
-		insts, err := c.ListInstances(ctx)
-		if err != nil {
-			return err
-		}
-		// No instances globally → force create. The picker would be empty.
-		if len(insts) == 0 {
-			st.Data["strategy"] = "create-new"
-			st.Input["create-new-instance"] = "true"
-			return nil
-		}
-		// Ask yes/no once.
-		if st.Input.Get("create-new-instance") == "" {
-			return &registry.NeedInput{
-				Reason: "Create a new Lightsail instance to deploy to?",
-				Fields: []registry.Field{
-					{Flag: "create-new-instance", Required: true,
-						Help: "create a new Lightsail instance",
-						Suggest: yesNoSuggest(
-							"pick an existing instance",
-							"create a new instance"),
-					},
-				},
-			}
-		}
-		if st.Input.Get("create-new-instance") == "true" {
-			st.Data["strategy"] = "create-new"
-		} else {
-			st.Data["strategy"] = "use-existing"
-		}
-		return nil
-	}
-}
-
-// createNewInstanceStep runs the full instance.CreateFields wizard
-// in-place. Two-phase:
-//
-//  1. First invocation: if no namespaced new-instance answers exist yet,
-//     return NeedInput listing the namespaced fields. The runtime pauses,
-//     collects, and retries.
-//  2. Second invocation: pull the namespaced answers into a sub-State,
-//     run instance.CreateStep, then hand the instance name back to the
-//     deploy flow via Input["instance"].
-//
-// The instance.CreateFields closures share mutable blueprint/platform
-// pointers that must be allocated exactly once per saga (see
-// instance.CreateFields doc). We stash the slice in st.Data on first
-// call so the NeedInput and the subsequent create see the same captured
-// state.
-func createNewInstanceStep(s *store) func(context.Context, *registry.State) error {
-	return func(ctx context.Context, st *registry.State) error {
-		const nsPrefix = "__ni/"
-
-		// Cache CreateFields so closure-captured bpType/platform
-		// pointers survive across the NeedInput retry.
-		fields, ok := st.Data["__ni_fields"].([]registry.Field)
-		if !ok {
-			istore := instance.NewStore(s.region, s.regionHints)
-			st.Data["__ni_store"] = istore
-			fields = instance.CreateFields(istore)
-			st.Data["__ni_fields"] = fields
-		}
-
-		// First invocation: the required fields haven't been collected.
-		// Detect by checking whether any required field is missing in
-		// the namespaced input.
-		if needsNewInstanceInput(fields, st.Input, nsPrefix) {
-			return &registry.NeedInput{
-				Reason: "New Lightsail instance",
-				Fields: namespaceFields(nsPrefix, fields),
-			}
-		}
-
-		// Second invocation: run the instance-create step against a
-		// private sub-state whose Input holds the un-namespaced values.
-		istore := st.Data["__ni_store"].(*instance.Store)
-		sub := &registry.State{
-			Input: registry.Input{},
-			Data:  map[string]any{},
-		}
-		for _, f := range fields {
-			if v, ok := st.Input[nsPrefix+f.Flag]; ok {
-				sub.Input[f.Flag] = v
-			}
-		}
-		if err := instance.CreateStep(istore).Do(ctx, sub); err != nil {
-			return err
-		}
-		// Hand the new instance back to deploy. The "instance" field
-		// in instance.CreateFields carries the just-created name.
-		newName := sub.Input.Get("name")
-		if newName == "" {
-			return fmt.Errorf("instance created but name not captured")
-		}
-		st.Input["instance"] = newName
-		// The new instance's region is already known — skip the
-		// region-resolve step's API call by seeding Input["region"].
-		if r := sub.Input.Get("region"); r != "" {
-			st.Input["region"] = r
-			pinRegion(s, r)
-		}
-		return nil
-	}
-}
-
-// pickExistingInstanceStep prompts for --instance via NeedInput. This
-// step exists because the up-front wizard doesn't ask for "instance"
-// anymore (Wizard:false) — the strategy step decides whether we need it
-// at all. Skipped when we just created a new instance.
-func pickExistingInstanceStep(s *store) func(context.Context, *registry.State) error {
-	return func(_ context.Context, st *registry.State) error {
-		if st.Input.Get("instance") != "" {
-			return nil
-		}
-		return &registry.NeedInput{
-			Reason: "Target Lightsail instance",
-			Fields: []registry.Field{
-				{Flag: "instance", Help: "target Lightsail instance",
-					Required: true, Suggest: instanceSuggest(s)},
-			},
-		}
-	}
-}
+// pickInstanceStrategyStep / createNewInstanceStep / pickExistingInstanceStep
+// have been replaced by the up-front wizard + applyStrategyStep +
+// createNewInstanceInlineStep. See op_deploy_wizard.go.
 
 // skipUnlessCreatingNewInstance skips the create-new-instance step
 // unless the strategy step decided "create-new".
@@ -324,16 +259,13 @@ func skipUnlessCreatingNewInstance(st *registry.State) bool {
 }
 
 // skipIfCreatingNewInstance skips the existing-instance picker when
-// we're going to create a new one (or already did).
+// we're going to create a new one (or already did). Kept for any
+// legacy callers; the current deploy saga no longer uses it.
 func skipIfCreatingNewInstance(st *registry.State) bool {
 	strategy, _ := st.Data["strategy"].(string)
 	return strategy == "create-new"
 }
 
-// yesNoSuggest returns a Suggest that offers exactly two choices,
-// matching the convention used by monitoring / ip-address-type etc.
-// The returned values are "false" (no) and "true" (yes) so callers can
-// check Input.Get(flag) == "true" without extra parsing.
 // yesNoSuggest returns a Suggest that offers exactly two choices.
 // The returned values are "false" (no) and "true" (yes). The
 // descriptions should NOT repeat "Yes"/"No" — the helper adds a
@@ -346,34 +278,6 @@ func yesNoSuggest(noDesc, yesDesc string) func(context.Context) ([]registry.Choi
 			{Value: "true", Display: "Yes  " + yesDesc},
 		}, nil
 	}
-}
-
-// namespaceFields returns a copy of fields with each Flag prefixed.
-// Suggest/Validate closures fire on values, not flag names, so copying
-// only the Flag is safe. The prefix shields the returned fields from
-// colliding with any of the parent saga's own fields (e.g. "name").
-func namespaceFields(prefix string, fields []registry.Field) []registry.Field {
-	out := make([]registry.Field, len(fields))
-	for i, f := range fields {
-		f.Flag = prefix + f.Flag
-		out[i] = f
-	}
-	return out
-}
-
-// needsNewInstanceInput reports whether any required instance-create
-// field is missing from the namespaced input. Optional fields (e.g.
-// user-data) don't force a NeedInput round-trip on their own.
-func needsNewInstanceInput(fields []registry.Field, in registry.Input, prefix string) bool {
-	for _, f := range fields {
-		if !f.Required {
-			continue
-		}
-		if in.Get(prefix+f.Flag) == "" {
-			return true
-		}
-	}
-	return false
 }
 
 // preloadFromConf is the op Pre hook: hydrates Input from lightsail.conf
