@@ -78,12 +78,14 @@ func TestSkipUnlessCreatingNewInstance_Matrix(t *testing.T) {
 	}
 }
 
-// TestAbortIfDeclinedStep_Variants checks that a missing answer or
-// "true" proceeds, while "false" aborts with a clear error.
+// TestAbortIfDeclinedStep_Variants verifies the new graceful-abort
+// contract: the step NEVER returns an error. Instead it flags
+// st.Data["aborted"]=true when the user declined, so downstream
+// steps can Skip without the runtime painting a failure.
 func TestAbortIfDeclinedStep_Variants(t *testing.T) {
 	cases := []struct {
-		v       string
-		wantErr bool
+		v           string
+		wantAborted bool
 	}{
 		{"", false},
 		{"true", false},
@@ -92,12 +94,43 @@ func TestAbortIfDeclinedStep_Variants(t *testing.T) {
 		{"no", true},
 	}
 	for _, tc := range cases {
-		st := &registry.State{Input: registry.Input{"deploy-confirm": tc.v}}
-		err := abortIfDeclinedStep(context.Background(), st)
-		if (err != nil) != tc.wantErr {
-			t.Errorf("deploy-confirm=%q: gotErr=%v wantErr=%v (err=%v)",
-				tc.v, err != nil, tc.wantErr, err)
+		st := &registry.State{
+			Input: registry.Input{"deploy-confirm": tc.v},
+			Data:  map[string]any{},
 		}
+		err := abortIfDeclinedStep(context.Background(), st)
+		if err != nil {
+			t.Errorf("deploy-confirm=%q: unexpected error: %v", tc.v, err)
+		}
+		got, _ := st.Data["aborted"].(bool)
+		if got != tc.wantAborted {
+			t.Errorf("deploy-confirm=%q: aborted=%v; want %v", tc.v, got, tc.wantAborted)
+		}
+	}
+}
+
+// TestSkipIfAborted_Variants sanity-checks the shared Skip helper.
+func TestSkipIfAborted_Variants(t *testing.T) {
+	cases := []struct {
+		name string
+		data map[string]any
+		want bool
+	}{
+		{"nil data", nil, false},
+		{"no flag", map[string]any{}, false},
+		{"false flag", map[string]any{"aborted": false}, false},
+		{"true flag", map[string]any{"aborted": true}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &registry.State{Data: tc.data}
+			if st.Data == nil {
+				st.Data = map[string]any{}
+			}
+			if got := skipIfAborted(st); got != tc.want {
+				t.Errorf("skipIfAborted = %v; want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -126,13 +159,13 @@ func TestYesNoSuggest_EmitsBoolValues(t *testing.T) {
 // __ni/* fields when strategy is create-new.
 func TestDeploySummaryPreamble_CreateNew(t *testing.T) {
 	in := registry.Input{
-		"name":                  "hello",
-		"env":                   "dev",
-		"create-new-instance":   "true",
-		"__ni/name":             "ancient-orbit",
-		"__ni/region":           "us-east-1",
-		"__ni/blueprint":        "amazon_linux_2023",
-		"__ni/bundle":           "large_3_0",
+		"name":                "hello",
+		"env":                 "dev",
+		"create-new-instance": "true",
+		"__ni/name":           "ancient-orbit",
+		"__ni/region":         "us-east-1",
+		"__ni/blueprint":      "amazon_linux_2023",
+		"__ni/bundle":         "large_3_0",
 	}
 	got := deploySummaryPreamble(in)
 	for _, want := range []string{"hello", "dev", "ancient-orbit", "us-east-1", "amazon_linux_2023", "large_3_0", "Lightsail Instance (new)"} {

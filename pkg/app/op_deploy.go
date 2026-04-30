@@ -160,29 +160,36 @@ func deployOp(s *store) registry.Operation {
 				// Detect conf.
 				return detectConfStep(ctx, st)
 			}},
-			// Configuration phase (non-interactive now): translate
-			// up-front wizard answers into saga state.
+			// Configuration phase: translate up-front wizard answers
+			// into saga state. Pure: sets st.Data["strategy"], no
+			// AWS calls, no mutations.
 			{Label: "Resolve deployment target", Do: applyStrategyStep(s)},
+			// Check the review-confirm answer FIRST, before any
+			// mutating work (instance create, bucket create, ...).
+			// Decline short-circuits via st.Data["aborted"]; all
+			// downstream steps see skipIfAborted.
+			{Label: "Confirm deploy plan", Do: abortIfDeclinedStep},
 			{Label: "Create new Lightsail instance",
 				Do:   createNewInstanceInlineStep(s),
-				Skip: skipUnlessCreatingNewInstance},
-			{Label: "Resolve region from instance", Do: resolveRegionFromInstanceStep(s), Skip: skipIfRegionSet, Undo: unpinStoreStep(s)},
-			{Label: "Abort if declined", Do: abortIfDeclinedStep},
-			{Label: "Create lightsail.conf", Do: saveConfigStep, Skip: skipIfConfDetected},
-			{Label: "Check app exists (create if missing)", Do: ensureAppStep(s), Undo: unpinStoreStep(s)},
-			{Label: "Resolve agent binary", Do: resolveAgentStep, Skip: skipIfAppExists},
-			{Label: "Create app-config bucket", Do: createAppBucketStep(s), Skip: skipIfAppExists},
-			{Label: "Create env bucket", Do: createEnvBucketStep(s), Skip: skipIfAppExists},
-			{Label: "Tag target instance", Do: tagInstanceStep(s), Skip: skipIfAppExists},
-			{Label: "Grant instance bucket access", Do: grantAccessStep(s), Skip: skipIfAppExists},
-			{Label: "Copy agent binary to instance", Do: scpAgentStep(s), Skip: skipIfAppExists},
-			{Label: "Install agent on instance", Do: remoteInstallStep(s), Skip: skipIfAppExists},
-			{Label: "Start agent on instance", Do: remoteUpStep(s), Skip: skipIfAppExists},
-			{Label: "Package source", Do: packageStep, Undo: packageUndo},
-			{Label: "Acquire bucket key", Do: acquireKeyStep(s), Undo: acquireKeyUndo},
-			{Label: "Upload deploy asset", Do: uploadStep},
-			{Label: "Open firewall ports", Do: firewallStep(s)},
-			{Label: "Release bucket key", Do: releaseKeyStep},
+				Skip: skipUnlessCreatingNewInstanceOrAborted},
+			{Label: "Resolve region from instance", Do: resolveRegionFromInstanceStep(s),
+				Skip: skipIfRegionSetOrAborted, Undo: unpinStoreStep(s)},
+			{Label: "Save lightsail.conf", Do: saveConfigStep, Skip: skipIfConfDetected},
+			{Label: "Check app exists (create if missing)", Do: ensureAppStep(s),
+				Skip: skipIfAborted, Undo: unpinStoreStep(s)},
+			{Label: "Resolve agent binary", Do: resolveAgentStep, Skip: skipIfAbortedOrAppExists},
+			{Label: "Create app-config bucket", Do: createAppBucketStep(s), Skip: skipIfAbortedOrAppExists},
+			{Label: "Create env bucket", Do: createEnvBucketStep(s), Skip: skipIfAbortedOrAppExists},
+			{Label: "Tag target instance", Do: tagInstanceStep(s), Skip: skipIfAbortedOrAppExists},
+			{Label: "Grant instance bucket access", Do: grantAccessStep(s), Skip: skipIfAbortedOrAppExists},
+			{Label: "Copy agent binary to instance", Do: scpAgentStep(s), Skip: skipIfAbortedOrAppExists},
+			{Label: "Install agent on instance", Do: remoteInstallStep(s), Skip: skipIfAbortedOrAppExists},
+			{Label: "Start agent on instance", Do: remoteUpStep(s), Skip: skipIfAbortedOrAppExists},
+			{Label: "Package source", Do: packageStep, Skip: skipIfAborted, Undo: packageUndo},
+			{Label: "Acquire bucket key", Do: acquireKeyStep(s), Skip: skipIfAborted, Undo: acquireKeyUndo},
+			{Label: "Upload deploy asset", Do: uploadStep, Skip: skipIfAborted},
+			{Label: "Open firewall ports", Do: firewallStep(s), Skip: skipIfAborted},
+			{Label: "Release bucket key", Do: releaseKeyStep, Skip: skipIfAborted},
 			{Label: "Wait for healthy", Do: func(ctx context.Context, st *registry.State) error {
 				err := waitStep(s)(ctx, st)
 				// Collect endpoints for the completion summary.
@@ -205,9 +212,14 @@ func deployOp(s *store) registry.Operation {
 				// Restore global view (housekeeping).
 				_ = unpinStoreStep(s)(ctx, st)
 				return err
-			}, Skip: skipIfNoWait},
+			}, Skip: skipIfAbortedOrNoWait},
 			// If no-wait, still restore global view.
 			{Label: "Finalize", Do: unpinStoreStep(s), Skip: func(st *registry.State) bool {
+				// Run on the normal no-wait path; also run on abort
+				// so the store unpins before the process exits.
+				if skipIfAborted(st) {
+					return false
+				}
 				return st.Input.Get("no-wait") != "true"
 			}},
 			// ── GitHub Actions CI setup (first-run only) ─────────
@@ -220,25 +232,25 @@ func deployOp(s *store) registry.Operation {
 			// "Offer GitHub Actions" row.
 			{Label: "Offer GitHub Actions deploy workflow",
 				Do:   offerGhActionChoiceStep,
-				Skip: skipOfferGhAction(s)},
+				Skip: skipOfferGhActionWithAbort(s)},
 			{Label: "Detect GitHub remote", Do: detectRemoteStep,
-				Skip: skipUnlessOptedIntoCI},
+				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
 			{Label: "Resolve GitHub token", Do: resolveGhTokenStep,
-				Skip: skipUnlessOptedIntoCI},
+				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
 			{Label: "Fetch repo metadata", Do: fetchRepoStep,
-				Skip: skipCIFetchRepo},
+				Skip: skipCIOrAborted(skipCIFetchRepo)},
 			{Label: "Build IAM policies", Do: buildPoliciesStep(s),
-				Skip: skipUnlessOptedIntoCI},
+				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
 			{Label: "Confirm IAM role creation", Do: confirmIAMCreateStep(s),
-				Skip: skipCIConfirmIAM(s)},
+				Skip: skipCIOrAborted(skipCIConfirmIAM(s))},
 			{Label: "Ensure OIDC provider", Do: ensureProviderStep(s),
-				Skip: skipCIProvisionIAM},
+				Skip: skipCIOrAborted(skipCIProvisionIAM)},
 			{Label: "Create IAM role", Do: ensureRoleStep(s),
-				Skip: skipCIProvisionIAM},
+				Skip: skipCIOrAborted(skipCIProvisionIAM)},
 			{Label: "Write workflow file", Do: writeWorkflowStep,
-				Skip: skipCIWriteWorkflow},
+				Skip: skipCIOrAborted(skipCIWriteWorkflow)},
 			{Label: "GitHub Actions setup complete", Do: enableSummaryStep,
-				Skip: skipUnlessOptedIntoCI},
+				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
 		},
 	}
 }
@@ -641,6 +653,53 @@ func releaseKeyStep(ctx context.Context, st *registry.State) error {
 func skipIfNoWait(st *registry.State) bool {
 	v := st.Input.Get("no-wait")
 	return v == "true" || v == "1" || v == "yes"
+}
+
+// ── compound Skip helpers used by the abort-graceful path ────────────
+//
+// When the user declines the up-front review, abortIfDeclinedStep
+// sets st.Data["aborted"]=true. Every subsequent saga step uses one
+// of these compound Skip helpers to short-circuit cleanly without the
+// runtime painting a red ✗.
+
+// skipUnlessCreatingNewInstanceOrAborted combines the normal
+// "only run when strategy=create-new" gate with the abort short-circuit.
+func skipUnlessCreatingNewInstanceOrAborted(st *registry.State) bool {
+	return skipIfAborted(st) || skipUnlessCreatingNewInstance(st)
+}
+
+// skipIfRegionSetOrAborted extends skipIfRegionSet with abort short-circuit.
+func skipIfRegionSetOrAborted(st *registry.State) bool {
+	return skipIfAborted(st) || skipIfRegionSet(st)
+}
+
+// skipIfAbortedOrAppExists replaces the bare skipIfAppExists on the
+// bootstrap sub-steps so an abort suppresses them even when the app
+// still needs creating.
+func skipIfAbortedOrAppExists(st *registry.State) bool {
+	return skipIfAborted(st) || skipIfAppExists(st)
+}
+
+// skipIfAbortedOrNoWait replaces the bare skipIfNoWait on the Wait-
+// for-healthy step.
+func skipIfAbortedOrNoWait(st *registry.State) bool {
+	return skipIfAborted(st) || skipIfNoWait(st)
+}
+
+// skipOfferGhActionWithAbort wraps skipOfferGhAction so the abort
+// path also suppresses the CI offer prompt.
+func skipOfferGhActionWithAbort(s *store) func(st *registry.State) bool {
+	inner := skipOfferGhAction(s)
+	return func(st *registry.State) bool {
+		return skipIfAborted(st) || inner(st)
+	}
+}
+
+// skipCIOrAborted combines any per-CI-step Skip with abort.
+func skipCIOrAborted(inner func(*registry.State) bool) func(*registry.State) bool {
+	return func(st *registry.State) bool {
+		return skipIfAborted(st) || inner(st)
+	}
 }
 
 func waitStep(s *store) func(context.Context, *registry.State) error {

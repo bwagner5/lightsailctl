@@ -193,10 +193,13 @@ func createNewInstanceInlineStep(s *store) func(context.Context, *registry.State
 	}
 }
 
-// abortIfDeclinedStep fails the saga when the user answered "no" to
-// the deploy-confirm up-front-wizard prompt. Runs right after region
-// resolution so any derived state is available but no mutating work
-// has started.
+// abortIfDeclinedStep gracefully short-circuits the remaining saga
+// when the user answered "no" to the deploy-confirm up-front-wizard
+// prompt. Rather than returning an error (which the runtime paints as
+// a red ✗ failure), it sets st.Data["aborted"]=true and surfaces a
+// friendly st.Output. Every subsequent saga step's Skip func honors
+// the flag — except saveConfigStep, which still runs so the user's
+// wizard answers are preserved in lightsail.conf for next time.
 //
 // Under -y the deploy-confirm field isn't present (wizard is skipped
 // entirely) so this step is effectively a no-op for unattended flows.
@@ -207,8 +210,22 @@ func abortIfDeclinedStep(_ context.Context, st *registry.State) error {
 		// (shouldn't happen in interactive mode). Treat as proceed.
 		return nil
 	}
-	if !asBool(v) {
-		return fmt.Errorf("deploy aborted by user")
+	if asBool(v) {
+		return nil
 	}
+	// Decline: short-circuit without erroring. Downstream steps
+	// check st.Data["aborted"] in their Skip funcs.
+	st.Data["aborted"] = true
+	st.Output = "Deploy aborted. Saved your choices to lightsail.conf so " +
+		"you can re-run `lightsailctl deploy` later without re-answering."
 	return nil
+}
+
+// skipIfAborted is the shared Skip function for every post-abort
+// saga step. Returns true once abortIfDeclinedStep has flagged the
+// decline, keeping the rest of the deploy from running without
+// marking it failed.
+func skipIfAborted(st *registry.State) bool {
+	aborted, _ := st.Data["aborted"].(bool)
+	return aborted
 }

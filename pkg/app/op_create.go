@@ -307,10 +307,18 @@ func saveConfigStep(ctx context.Context, st *registry.State) error {
 	// Merge with any existing conf so we don't drop fields we don't know
 	// about here (e.g. user-added Ignore entries).
 	existing, _ := config.Load(filepath.Join(cwd, config.Filename))
+	// On the create-new-instance abort path we get here before
+	// createNewInstanceInlineStep ran, so Input["region"] / ["instance"]
+	// aren't populated yet. Fall back to the namespaced new-instance
+	// answers so the saved conf reflects the user's choices.
+	region := st.Input.Get("region")
+	if region == "" {
+		region = st.Input.Get("__ni/region")
+	}
 	cfg := &config.Config{
 		App:       st.Input.Get("name"),
 		Env:       st.Input.Get("env"),
-		Region:    st.Input.Get("region"),
+		Region:    region,
 		Instance:  st.Input.Get("instance"),
 		AgentPath: st.Input.Get("agent-path"),
 	}
