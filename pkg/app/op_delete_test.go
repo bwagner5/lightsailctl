@@ -4,12 +4,66 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bwagner5/triad/pkg/registry"
 
 	"github.com/aws/lightsailctl/pkg/config"
 )
+
+func TestDeleteOpRunsRemoteDownBeforeUntag(t *testing.T) {
+	op := deleteOp(&store{}, nil)
+	var remoteDown, untag int = -1, -1
+	for i, step := range op.Steps {
+		switch step.Label {
+		case "Stop remote app services":
+			remoteDown = i
+		case "Untag target instances":
+			untag = i
+		}
+	}
+	if remoteDown < 0 {
+		t.Fatal("delete op missing remote local down step")
+	}
+	if untag < 0 {
+		t.Fatal("delete op missing untag step")
+	}
+	if remoteDown > untag {
+		t.Fatalf("remote local down step index=%d should run before untag index=%d", remoteDown, untag)
+	}
+}
+
+func TestRemoteLocalDownCommandQuotesInputs(t *testing.T) {
+	got := remoteLocalDownCommand("my'app", "prod env")
+	for _, want := range []string{
+		"sudo /usr/local/bin/lightsailctl app local down",
+		"--app 'my'\"'\"'app'",
+		"--env 'prod env'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("command %q missing %q", got, want)
+		}
+	}
+}
+
+func TestRemoteLocalDownSummary(t *testing.T) {
+	got := remoteLocalDownSummary(
+		[]string{"box-a/dev", "box-b/prod"},
+		[]string{"box-c/stage: ssh failed"},
+	)
+	for _, want := range []string{
+		"Stopped remote services on 2 target(s):",
+		"box-a/dev",
+		"box-b/prod",
+		"Skipped remote service cleanup on 1 target(s):",
+		"box-c/stage: ssh failed",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary %q missing %q", got, want)
+		}
+	}
+}
 
 // TestRemoveLocalConfStep_Matches asserts the conf is deleted when its
 // App matches the deleted-app name.

@@ -16,15 +16,13 @@ import (
 )
 
 // deleteOp: tear down an app. Phases:
-//  1. Untag all instances targeting the app
-//  2. Reset firewall on any newly-unused instance
-//  3. Delete all env buckets + the app-config bucket
-//  4. Delete any CI IAM role(s) `enable-gh-action` provisioned for this app
-//  5. Remove the local GitHub Actions workflow file
-//  6. Remove the local lightsail.conf
-//
-// Phase 5 will add a step-0 that runs `lightsailctl app local down` over SSH
-// on each target to cleanly tear down containers.
+//  1. Run remote `app local down` on each target instance/env
+//  2. Untag all instances targeting the app
+//  3. Reset firewall on any newly-unused instance
+//  4. Delete all env buckets + the app-config bucket
+//  5. Delete any CI IAM role(s) `enable-gh-action` provisioned for this app
+//  6. Remove the local GitHub Actions workflow file
+//  7. Remove the local lightsail.conf
 func deleteOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
 	return registry.Operation{
 		Name: "delete", Aliases: []string{"rm"}, Key: "ctrl+d",
@@ -35,6 +33,7 @@ func deleteOp(s *store, suggest func(context.Context) ([]registry.Choice, error)
 		},
 		Steps: []registry.Step{
 			{Label: "Discover target instances", Do: discoverTargetsStep(s)},
+			{Label: "Stop remote app services", Do: remoteLocalDownStep(s), Skip: skipIfNoTargets},
 			{Label: "Untag target instances", Do: untagTargetsStep(s), Skip: skipIfNoTargets},
 			{Label: "Reset firewalls on unused instances", Do: resetFirewallsStep(s), Skip: skipIfNoTargets},
 			{Label: "List app buckets", Do: listBucketsForDeleteStep(s)},
@@ -73,6 +72,84 @@ func discoverTargetsStep(s *store) func(context.Context, *registry.State) error 
 func skipIfNoTargets(st *registry.State) bool {
 	refs, _ := st.Data["targets"].([]lightsail.TargetRef)
 	return len(refs) == 0
+}
+
+func remoteLocalDownStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		refs, _ := st.Data["targets"].([]lightsail.TargetRef)
+		if len(refs) == 0 {
+			return nil
+		}
+
+		var stopped []string
+		var skipped []string
+		for _, r := range refs {
+			rc := c
+			if r.Region != "" {
+				rc = c.WithRegion(r.Region)
+			}
+			label := r.Instance + "/" + r.Env
+			if err := runRemoteLocalDown(ctx, rc, st.Input.Get("name"), r); err != nil {
+				skipped = append(skipped, label+": "+err.Error())
+				continue
+			}
+			stopped = append(stopped, label)
+		}
+		st.Output = remoteLocalDownSummary(stopped, skipped)
+		return nil
+	}
+}
+
+func runRemoteLocalDown(ctx context.Context, c *lightsail.Client, appName string, ref lightsail.TargetRef) error {
+	creds, err := c.GetInstanceSSH(ctx, ref.Instance)
+	if err != nil {
+		return err
+	}
+	defer creds.Remove()
+	cmd := remoteLocalDownCommand(appName, ref.Env)
+	if out, err := creds.SSHRun(ctx, cmd); err != nil {
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			return fmt.Errorf("%s: %w", msg, err)
+		}
+		return err
+	}
+	return nil
+}
+
+func remoteLocalDownCommand(appName, env string) string {
+	return fmt.Sprintf("sudo /usr/local/bin/lightsailctl app local down --app %s --env %s",
+		shellQuote(appName), shellQuote(env))
+}
+
+func remoteLocalDownSummary(stopped, skipped []string) string {
+	var b strings.Builder
+	if len(stopped) > 0 {
+		fmt.Fprintf(&b, "Stopped remote services on %d target(s):", len(stopped))
+		for _, s := range stopped {
+			b.WriteString("\n  " + s)
+		}
+	}
+	if len(skipped) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "Skipped remote service cleanup on %d target(s):", len(skipped))
+		for _, s := range skipped {
+			b.WriteString("\n  " + s)
+		}
+	}
+	return b.String()
+}
+
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
 func untagTargetsStep(s *store) func(context.Context, *registry.State) error {
