@@ -584,6 +584,10 @@ func offerGhActionChoiceStep(_ context.Context, st *registry.State) error {
 		Fields: []registry.Field{
 			{Flag: "offer-gh-action", Required: true,
 				Help: "opt in to CI setup", Kind: registry.KindBool,
+				// Default to Yes: the prompt only fires on first-run
+				// deploys of a GitHub-hosted repo, where CI setup is
+				// the common next step.
+				Default: "true",
 				Suggest: yesNoSuggest(
 					"I'll do this later",
 					"walk me through it"),
