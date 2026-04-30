@@ -48,4 +48,3 @@ func TestBucketNames(t *testing.T) {
 		t.Errorf("EnvBucketName: %q", got)
 	}
 }
-

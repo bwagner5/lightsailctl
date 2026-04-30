@@ -10,14 +10,14 @@ import (
 func TestRenderDeploySummary_CreateNew(t *testing.T) {
 	st := &registry.State{
 		Input: registry.Input{
-			"name":          "hello-world",
-			"env":           "dev",
-			"region":        "us-east-1",
-			"__ni/name":     "ancient-orbit",
-			"__ni/region":   "us-east-1",
+			"name":           "hello-world",
+			"env":            "dev",
+			"region":         "us-east-1",
+			"__ni/name":      "ancient-orbit",
+			"__ni/region":    "us-east-1",
 			"__ni/blueprint": "amazon_linux_2023",
-			"__ni/bundle":   "large_3_0",
-			"agent-path":    "/tmp/lightsailctl",
+			"__ni/bundle":    "large_3_0",
+			"agent-path":     "/tmp/lightsailctl",
 		},
 		Data: map[string]any{"strategy": "create-new"},
 	}

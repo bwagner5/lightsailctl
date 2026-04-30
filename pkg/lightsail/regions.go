@@ -74,7 +74,7 @@ const (
 // the set of continents is fixed, the Lightsail team doesn't invent new
 // ones on release cadence.
 var continentGroupLabels = map[string]string{
-	"NA": "US",           // North America — overridden below for ca-*.
+	"NA": "US", // North America — overridden below for ca-*.
 	"SA": "South America",
 	"EU": "Europe",
 	"AS": "Asia Pacific", // some partners encode Asia as AS
@@ -403,12 +403,7 @@ func readSnapshot() ([]Region, error) {
 func fromJSONRegions(in []regionJS) []Region {
 	out := make([]Region, 0, len(in))
 	for _, r := range in {
-		out = append(out, Region{
-			ID:          r.ID,
-			DisplayName: r.DisplayName,
-			Continent:   r.Continent,
-			Description: r.Description,
-		})
+		out = append(out, Region(r))
 	}
 	return out
 }
@@ -416,12 +411,7 @@ func fromJSONRegions(in []regionJS) []Region {
 func toJSONRegions(in []Region) []regionJS {
 	out := make([]regionJS, 0, len(in))
 	for _, r := range in {
-		out = append(out, regionJS{
-			ID:          r.ID,
-			DisplayName: r.DisplayName,
-			Continent:   r.Continent,
-			Description: r.Description,
-		})
+		out = append(out, regionJS(r))
 	}
 	return out
 }
@@ -574,4 +564,3 @@ func SortRegionsByGroup(ids []string) []string {
 	})
 	return out
 }
-

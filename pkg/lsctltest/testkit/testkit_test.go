@@ -4,10 +4,10 @@ import "testing"
 
 func TestInstanceState(t *testing.T) {
 	cases := []struct {
-		name    string
-		raw     string
-		want    string
-		wantOK  bool
+		name   string
+		raw    string
+		want   string
+		wantOK bool
 	}{
 		{
 			name:   "capitalized field and value",

@@ -74,10 +74,10 @@ type Env struct {
 
 // Step is a single executed action within a test.
 type Step struct {
-	Name    string        // human label, e.g. "create instance"
-	Cmd     string        // full shell command (or empty for non-CLI steps)
-	Output  string        // combined stdout+stderr
-	Err     error         // non-nil on failure
+	Name    string // human label, e.g. "create instance"
+	Cmd     string // full shell command (or empty for non-CLI steps)
+	Output  string // combined stdout+stderr
+	Err     error  // non-nil on failure
 	Elapsed time.Duration
 }
 

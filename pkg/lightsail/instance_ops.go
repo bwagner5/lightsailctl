@@ -25,7 +25,7 @@ func (c *Client) CreateInstance(ctx context.Context, name, az, blueprintID, bund
 	}
 	if monitoring {
 		in.AddOns = []lstypes.AddOnRequest{{
-			AddOnType:              lstypes.AddOnTypeAutoSnapshot,
+			AddOnType:                lstypes.AddOnTypeAutoSnapshot,
 			AutoSnapshotAddOnRequest: &lstypes.AutoSnapshotAddOnRequest{},
 		}}
 	}
@@ -39,7 +39,7 @@ func (c *Client) CreateInstance(ctx context.Context, name, az, blueprintID, bund
 // DeleteInstance deletes a Lightsail instance by name.
 func (c *Client) DeleteInstance(ctx context.Context, name string) error {
 	_, err := c.ls.DeleteInstance(ctx, &lightsail.DeleteInstanceInput{
-		InstanceName:    aws.String(name),
+		InstanceName:      aws.String(name),
 		ForceDeleteAddOns: aws.Bool(true),
 	})
 	if err != nil {

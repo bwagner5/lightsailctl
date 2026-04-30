@@ -22,9 +22,9 @@ func TestIsReleaseVersion(t *testing.T) {
 		{"v1.0.7", true},
 		{"v1.0.0", true},
 		{"v10.20.30", true},
-		{"1.0.7", false},                // no leading v
-		{"v1.0.7-rc1", false},           // prerelease
-		{"v1.0.8-next", false},          // snapshot
+		{"1.0.7", false},                 // no leading v
+		{"v1.0.7-rc1", false},            // prerelease
+		{"v1.0.8-next", false},           // snapshot
 		{"v0.0.0-20230101120000", false}, // pseudo-version
 		{"", false},
 		{"vv1.0.7", false},
