@@ -331,7 +331,37 @@ func preloadFromConf(_ context.Context, in registry.Input) error {
 	if in.Get("agent-path") == "" && cfg.AgentPath != "" {
 		in["agent-path"] = cfg.AgentPath
 	}
+	// Resume an in-progress create-new-instance draft if one was
+	// saved on a prior aborted deploy. Pre-populate both the yes/no
+	// strategy gate AND the namespaced __ni/* fields so the wizard
+	// skips those prompts (via their When predicates reading
+	// Input) and the Review preamble shows the saved draft. The
+	// user still confirms at the review step.
+	if p := cfg.PendingInstance; p != nil && cfg.Instance == "" {
+		if in.Get("create-new-instance") == "" {
+			in["create-new-instance"] = "true"
+		}
+		setIfEmpty(in, "__ni/name", p.Name)
+		setIfEmpty(in, "__ni/region", p.Region)
+		setIfEmpty(in, "__ni/blueprint-type", p.BlueprintType)
+		setIfEmpty(in, "__ni/blueprint", p.Blueprint)
+		setIfEmpty(in, "__ni/bundle", p.Bundle)
+		setIfEmpty(in, "__ni/ip-address-type", p.IPAddressType)
+		setIfEmpty(in, "__ni/user-data", p.UserData)
+		setIfEmpty(in, "__ni/monitoring", p.Monitoring)
+	}
 	return nil
+}
+
+// setIfEmpty writes v into in[k] only when the existing value is empty.
+// Preserves explicit-flag > env-var > conf precedence.
+func setIfEmpty(in registry.Input, k, v string) {
+	if v == "" {
+		return
+	}
+	if in.Get(k) == "" {
+		in[k] = v
+	}
 }
 
 // detectConfStep records in st.Data whether the conf pre-existed and

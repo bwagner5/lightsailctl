@@ -325,12 +325,42 @@ func saveConfigStep(ctx context.Context, st *registry.State) error {
 	if existing != nil {
 		cfg.Ignore = existing.Ignore
 	}
+	// Persist the create-new-instance draft when the deploy is
+	// aborted before the instance actually gets created. Next run
+	// re-reads these into Input so the wizard doesn't re-ask. The
+	// draft is cleared once the instance is real (see
+	// clearPendingInstanceStep).
+	aborted, _ := st.Data["aborted"].(bool)
+	strategy, _ := st.Data["strategy"].(string)
+	if aborted && strategy == "create-new" && cfg.Instance == "" {
+		cfg.PendingInstance = pendingInstanceFromInput(st.Input)
+	}
 	p := filepath.Join(cwd, config.Filename)
 	if err := cfg.Save(p); err != nil {
 		return err
 	}
 	st.Data["conf_path"] = p
 	return nil
+}
+
+// pendingInstanceFromInput extracts the namespaced __ni/* answers
+// into a config.PendingInstance draft. Returns nil when no draft
+// fields are set.
+func pendingInstanceFromInput(in registry.Input) *config.PendingInstance {
+	p := &config.PendingInstance{
+		Name:          in.Get("__ni/name"),
+		Region:        in.Get("__ni/region"),
+		BlueprintType: in.Get("__ni/blueprint-type"),
+		Blueprint:     in.Get("__ni/blueprint"),
+		Bundle:        in.Get("__ni/bundle"),
+		IPAddressType: in.Get("__ni/ip-address-type"),
+		UserData:      in.Get("__ni/user-data"),
+		Monitoring:    in.Get("__ni/monitoring"),
+	}
+	if p.Name == "" && p.Region == "" && p.Blueprint == "" && p.Bundle == "" {
+		return nil
+	}
+	return p
 }
 
 // mustClient panics if the client can't be built; only for Undo paths where

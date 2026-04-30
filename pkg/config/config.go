@@ -38,8 +38,32 @@ type Config struct {
 	AgentPath string   `yaml:"agent-path,omitempty"`
 	Ignore    []string `yaml:"ignore,omitempty"`
 
+	// PendingInstance, when non-nil, holds a draft describing a new
+	// Lightsail instance the user answered the create-new wizard for
+	// but hasn't yet committed to creating (typically because they
+	// aborted at the review step). On the next `lightsailctl deploy`
+	// run the fields are pre-populated so the user doesn't have to
+	// re-enter them; they're still asked to confirm. Cleared once
+	// the instance is actually created.
+	PendingInstance *PendingInstance `yaml:"pending-instance,omitempty"`
+
 	// Path is the file the Config was loaded from. Empty when not loaded.
 	Path string `yaml:"-"`
+}
+
+// PendingInstance mirrors the subset of instance.CreateFields the deploy
+// wizard collects under the __ni/ namespace. Every field is omitempty
+// so a partially-answered draft is representable (and won't produce
+// stray YAML keys in the conf file).
+type PendingInstance struct {
+	Name          string `yaml:"name,omitempty"`
+	Region        string `yaml:"region,omitempty"`
+	BlueprintType string `yaml:"blueprint-type,omitempty"`
+	Blueprint     string `yaml:"blueprint,omitempty"`
+	Bundle        string `yaml:"bundle,omitempty"`
+	IPAddressType string `yaml:"ip-address-type,omitempty"`
+	UserData      string `yaml:"user-data,omitempty"`
+	Monitoring    string `yaml:"monitoring,omitempty"`
 }
 
 // Find walks up from start looking for lightsail.conf. Returns the path or
