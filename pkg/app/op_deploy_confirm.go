@@ -36,8 +36,8 @@ func confirmDeployStep(s *store) func(context.Context, *registry.State) error {
 				{Flag: "deploy-confirm", Required: true,
 					Help: "proceed with this deploy",
 					Suggest: yesNoSuggest(
-						"No, abort",
-						"Yes, deploy now"),
+						"abort",
+						"deploy now"),
 				},
 			},
 		}

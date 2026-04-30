@@ -211,8 +211,8 @@ func pickInstanceStrategyStep(s *store) func(context.Context, *registry.State) e
 					{Flag: "create-new-instance", Required: true,
 						Help: "create a new Lightsail instance",
 						Suggest: yesNoSuggest(
-							"No, pick an existing one",
-							"Yes, create a new instance"),
+							"pick an existing instance",
+							"create a new instance"),
 					},
 				},
 			}
@@ -334,11 +334,16 @@ func skipIfCreatingNewInstance(st *registry.State) bool {
 // matching the convention used by monitoring / ip-address-type etc.
 // The returned values are "false" (no) and "true" (yes) so callers can
 // check Input.Get(flag) == "true" without extra parsing.
-func yesNoSuggest(noDisplay, yesDisplay string) func(context.Context) ([]registry.Choice, error) {
+// yesNoSuggest returns a Suggest that offers exactly two choices.
+// The returned values are "false" (no) and "true" (yes). The
+// descriptions should NOT repeat "Yes"/"No" — the helper adds a
+// styled prefix itself. Matches the convention used by the
+// monitoring / ip-address-type pickers.
+func yesNoSuggest(noDesc, yesDesc string) func(context.Context) ([]registry.Choice, error) {
 	return func(_ context.Context) ([]registry.Choice, error) {
 		return []registry.Choice{
-			{Value: "false", Display: "No   " + noDisplay},
-			{Value: "true", Display: "Yes  " + yesDisplay},
+			{Value: "false", Display: "No   " + noDesc},
+			{Value: "true", Display: "Yes  " + yesDesc},
 		}, nil
 	}
 }

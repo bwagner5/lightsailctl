@@ -528,11 +528,11 @@ func removeWorkflowStep(_ context.Context, st *registry.State) error {
 // skipOfferGhAction returns true when the offer-CI tail step should
 // not run. The gate is strict: any of the following → skip.
 //
-//   1. non-interactive (-y): we don't prompt, and silently
-//      provisioning IAM against the user's account without explicit
-//      opt-in is a non-starter.
-//   2. lightsail.conf pre-existed: this isn't the first-run path.
-//   3. no GitHub remote: the workflow generator is github.com-only.
+//  1. non-interactive (-y): we don't prompt, and silently
+//     provisioning IAM against the user's account without explicit
+//     opt-in is a non-starter.
+//  2. lightsail.conf pre-existed: this isn't the first-run path.
+//  3. no GitHub remote: the workflow generator is github.com-only.
 func skipOfferGhAction(s *store) func(st *registry.State) bool {
 	return func(st *registry.State) bool {
 		if !s.Interactive() {
@@ -573,8 +573,8 @@ func offerGhActionStep(s *store) func(context.Context, *registry.State) error {
 					{Flag: "offer-gh-action", Required: true,
 						Help: "opt in to CI setup",
 						Suggest: yesNoSuggest(
-							"No, I'll do this later",
-							"Yes, walk me through it"),
+							"I'll do this later",
+							"walk me through it"),
 					},
 				},
 			}
