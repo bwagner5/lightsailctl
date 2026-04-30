@@ -16,6 +16,8 @@ func (c *Client) CreateInstance(ctx context.Context, name, az, blueprintID, bund
 		AvailabilityZone: aws.String(az),
 		BlueprintId:      aws.String(blueprintID),
 		BundleId:         aws.String(bundleID),
+		// Version tag for future upgrade tooling.
+		Tags: lightsailTagsFromMap(DefaultResourceTags()),
 	}
 	if ipType != "" {
 		in.IpAddressType = lstypes.IpAddressType(ipType)

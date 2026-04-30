@@ -354,9 +354,10 @@ func ensureRoleStep(s *store) func(context.Context, *registry.State) error {
 			PermissionsPolicy: perm,
 			Description:       fmt.Sprintf("CI deploy role for %s/%s (%s/%s)", owner, repo, st.Input.Get("name"), st.Input.Get("env")),
 			Tags: map[string]string{
-				"lightsailctl:app":  st.Input.Get("name"),
-				"lightsailctl:env":  st.Input.Get("env"),
-				"lightsailctl:repo": owner + "/" + repo,
+				lightsail.VersionTagKey: lightsail.CLIVersion(),
+				"lightsailctl:app":     st.Input.Get("name"),
+				"lightsailctl:env":     st.Input.Get("env"),
+				"lightsailctl:repo":    owner + "/" + repo,
 			},
 		})
 		if err != nil {

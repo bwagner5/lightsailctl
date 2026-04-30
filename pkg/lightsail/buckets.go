@@ -211,6 +211,10 @@ func (c *Client) CreateBucket(ctx context.Context, name string) error {
 	_, err := c.ls.CreateBucket(ctx, &lightsail.CreateBucketInput{
 		BucketName: &name,
 		BundleId:   &bundle,
+		// Tag every lightsailctl-created resource with the CLI
+		// version that made it, so future upgrade tooling can
+		// identify and migrate them.
+		Tags: lightsailTagsFromMap(DefaultResourceTags()),
 	})
 	if err != nil && !isAlreadyExists(err) {
 		return err
