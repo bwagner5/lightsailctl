@@ -13,13 +13,14 @@ import (
 
 // Row is one row in the instances table.
 type Row struct {
-	Name      string
-	State     string
-	Age       string
-	IP        string
-	Region    string
-	Blueprint string
-	Bundle    string
+	Name       string
+	State      string
+	Age        string
+	IP         string
+	Region     string
+	Blueprint  string
+	Bundle     string
+	appTargets string
 }
 
 type Store struct {
@@ -63,13 +64,14 @@ func (s *Store) List(ctx context.Context, _ registry.Filter) ([]any, error) {
 	out := make([]any, len(instances))
 	for i, inst := range instances {
 		out[i] = Row{
-			Name:      inst.Name,
-			State:     inst.State,
-			Age:       formatTime(inst.CreatedAt),
-			IP:        inst.IP,
-			Region:    inst.Region,
-			Blueprint: inst.Blueprint,
-			Bundle:    inst.Bundle,
+			Name:       inst.Name,
+			State:      inst.State,
+			Age:        formatTime(inst.CreatedAt),
+			IP:         inst.IP,
+			Region:     inst.Region,
+			Blueprint:  inst.Blueprint,
+			Bundle:     inst.Bundle,
+			appTargets: appTargets(inst.Tags),
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].(Row).Name < out[j].(Row).Name })
@@ -86,13 +88,14 @@ func (s *Store) Get(ctx context.Context, id string) (any, error) {
 		return nil, err
 	}
 	return Row{
-		Name:      inst.Name,
-		State:     inst.State,
-		Age:       formatTime(inst.CreatedAt),
-		IP:        inst.IP,
-		Region:    inst.Region,
-		Blueprint: inst.Blueprint,
-		Bundle:    inst.Bundle,
+		Name:       inst.Name,
+		State:      inst.State,
+		Age:        formatTime(inst.CreatedAt),
+		IP:         inst.IP,
+		Region:     inst.Region,
+		Blueprint:  inst.Blueprint,
+		Bundle:     inst.Bundle,
+		appTargets: appTargets(inst.Tags),
 	}, nil
 }
 
@@ -123,6 +126,7 @@ func Resource(region *string, regionHints []string) registry.Resource {
 		Short:   "manage Lightsail instances",
 		Fields:  fields,
 		Store:   st,
+		Detail:  rowDetail,
 		Operations: map[string]registry.Operation{
 			"create":   createOp(st),
 			"delete":   deleteOp(st, suggest),

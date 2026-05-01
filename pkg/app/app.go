@@ -354,6 +354,7 @@ func ResourceWithOptions(region *string, regionHints []string, nonInteractive *b
 		Short:   "manage Lightsail Applications",
 		Fields:  fields,
 		Store:   st,
+		Detail:  appDetail,
 		Operations: map[string]registry.Operation{
 			"create":            createOp(st),
 			"status":            statusOp(st, suggest),
