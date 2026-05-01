@@ -38,7 +38,6 @@ func deleteOp(s *store, suggest func(context.Context) ([]registry.Choice, error)
 			{Label: "Reset firewalls on unused instances", Do: resetFirewallsStep(s), Skip: skipIfNoTargets},
 			{Label: "List app buckets", Do: listBucketsForDeleteStep(s)},
 			{Label: "Delete env buckets", Do: deleteEnvBucketsStep(s), Skip: skipIfNoEnvBuckets},
-			{Label: "Delete app-config bucket", Do: deleteAppConfigBucketStep(s), Skip: skipIfNoAppConfigBucket},
 			{Label: "Discover CI IAM roles", Do: discoverCIRolesStep(s)},
 			{Label: "Delete CI IAM roles", Do: deleteCIRolesStep(s), Skip: skipIfNoCIRoles},
 			{Label: "Remove local GitHub Actions workflow", Do: removeLocalWorkflowStep, Skip: skipIfNoLocalWorkflow},
@@ -187,9 +186,7 @@ func resetFirewallsStep(s *store) func(context.Context, *registry.State) error {
 	}
 }
 
-// listBucketsForDeleteStep splits the app's buckets into env vs app-config
-// so the two categories can show as separate steps. Env buckets (plural)
-// are grouped; the app-config bucket is singular.
+// listBucketsForDeleteStep finds the app's env buckets for deletion.
 func listBucketsForDeleteStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		c, err := s.ensure(ctx)
@@ -202,19 +199,13 @@ func listBucketsForDeleteStep(s *store) func(context.Context, *registry.State) e
 		}
 		name := st.Input.Get("name")
 		var envBuckets []lightsail.Bucket
-		var appConfig *lightsail.Bucket
 		for i := range all {
 			b := all[i]
 			if a, _ := lightsail.ParseAppEnv(b.Name); a == name {
 				envBuckets = append(envBuckets, b)
-				continue
-			}
-			if lightsail.ParseAppFromAppBucket(b.Name) == name {
-				appConfig = &b
 			}
 		}
 		st.Data["env_buckets"] = envBuckets
-		st.Data["app_config_bucket"] = appConfig
 		return nil
 	}
 }
@@ -222,11 +213,6 @@ func listBucketsForDeleteStep(s *store) func(context.Context, *registry.State) e
 func skipIfNoEnvBuckets(st *registry.State) bool {
 	bs, _ := st.Data["env_buckets"].([]lightsail.Bucket)
 	return len(bs) == 0
-}
-
-func skipIfNoAppConfigBucket(st *registry.State) bool {
-	b, _ := st.Data["app_config_bucket"].(*lightsail.Bucket)
-	return b == nil
 }
 
 func deleteEnvBucketsStep(s *store) func(context.Context, *registry.State) error {
@@ -245,23 +231,6 @@ func deleteEnvBucketsStep(s *store) func(context.Context, *registry.State) error
 			}
 		}
 		return firstErr
-	}
-}
-
-func deleteAppConfigBucketStep(s *store) func(context.Context, *registry.State) error {
-	return func(ctx context.Context, st *registry.State) error {
-		c, err := s.ensure(ctx)
-		if err != nil {
-			return err
-		}
-		b, _ := st.Data["app_config_bucket"].(*lightsail.Bucket)
-		if b == nil {
-			return nil
-		}
-		if err := c.DeleteBucket(ctx, b.Name, b.Region); err != nil && !lightsail.IsNotFound(err) {
-			return err
-		}
-		return nil
 	}
 }
 

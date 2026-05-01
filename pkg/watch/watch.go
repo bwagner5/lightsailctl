@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -216,6 +217,20 @@ func writeStatus(ctx context.Context, svc *s3.Client, bucket, region, instance, 
 	_ = put(ctx, svc, bucket, instance+lightsail.StatusSuffix, []byte(body), "application/json")
 }
 
+// deployTimeFromKey extracts the unix timestamp from a deploy asset key
+// (deploy/<unix>-<sha>.tar.gz). Falls back to time.Now() if unparseable.
+func deployTimeFromKey(key string) time.Time {
+	// Strip "deploy/" prefix.
+	name := strings.TrimPrefix(key, "deploy/")
+	// Split on "-" to get the unix timestamp before the sha.
+	if i := strings.Index(name, "-"); i > 0 {
+		if ts, err := strconv.ParseInt(name[:i], 10, 64); err == nil {
+			return time.Unix(ts, 0).UTC()
+		}
+	}
+	return time.Now().UTC()
+}
+
 func statusJSON(instance, bucket, region, lastKey, currentDir string) string {
 	st := lightsail.Status{
 		Instance:  instance,
@@ -224,7 +239,7 @@ func statusJSON(instance, bucket, region, lastKey, currentDir string) string {
 	}
 	if lastKey != "" {
 		st.LastDeploy = &lightsail.DeployInfo{
-			Timestamp: time.Now().UTC(), // best-effort; actual asset ts embedded in key
+			Timestamp: deployTimeFromKey(lastKey),
 			ObjectURL: fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", bucket, region, lastKey),
 		}
 	}

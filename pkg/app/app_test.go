@@ -8,7 +8,6 @@ import (
 
 func TestAggregate(t *testing.T) {
 	buckets := []lightsail.Bucket{
-		{Name: "ls--123--foo", State: "OK", Region: "us-east-1"},
 		{Name: "ls--123--foo--dev", State: "OK", Region: "us-east-1"},
 		{Name: "ls--123--foo--prod", State: "OK", Region: "us-east-1"},
 		{Name: "ls--123--bar--dev", State: "OK", Region: "us-east-1"},
@@ -22,7 +21,7 @@ func TestAggregate(t *testing.T) {
 	if bar.Name != "bar" || bar.Envs != "dev" {
 		t.Errorf("bar: %+v", bar)
 	}
-	if foo.Name != "foo" || foo.Envs != "dev,prod" || foo.Bucket != "ls--123--foo" {
+	if foo.Name != "foo" || foo.Envs != "dev,prod" {
 		t.Errorf("foo: %+v", foo)
 	}
 }

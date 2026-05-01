@@ -195,7 +195,6 @@ func deployOp(s *store) registry.Operation {
 			{Label: "Check app exists (create if missing)", Do: ensureAppStep(s),
 				Skip: skipIfAborted, Undo: unpinStoreStep(s)},
 			{Label: "Resolve agent binary", Do: resolveAgentStep, Skip: skipIfAbortedOrAppExists},
-			{Label: "Create app-config bucket", Do: createAppBucketStep(s), Skip: skipIfAbortedOrAppExists},
 			{Label: "Create env bucket", Do: createEnvBucketStep(s), Skip: skipIfAbortedOrAppExists},
 			{Label: "Tag target instance", Do: tagInstanceStep(s), Skip: skipIfAbortedOrAppExists},
 			{Label: "Grant instance bucket access", Do: grantAccessStep(s), Skip: skipIfAbortedOrAppExists},
@@ -208,8 +207,12 @@ func deployOp(s *store) registry.Operation {
 			{Label: "Open firewall ports", Do: firewallStep(s), Skip: skipIfAborted},
 			{Label: "Release bucket key", Do: releaseKeyStep, Skip: skipIfAborted},
 			{Label: "Wait for healthy", Do: func(ctx context.Context, st *registry.State) error {
-				err := waitStep(s)(ctx, st)
-				// Collect endpoints for the completion summary.
+				return waitStep(s)(ctx, st)
+			}, Skip: skipIfAbortedOrNoWait},
+			// If no-wait, still restore global view.
+			{Label: "Finalize", Do: func(ctx context.Context, st *registry.State) error {
+				// Collect endpoints BEFORE unpinning the region — the
+				// region-pinned client is needed for S3ClientFor.
 				if c, cerr := s.ensure(ctx); cerr == nil {
 					if bucket, ok := st.Data["bucket"].(string); ok {
 						if statuses, serr := c.ReadBucketStatuses(ctx, bucket); serr == nil {
@@ -218,27 +221,20 @@ func deployOp(s *store) registry.Operation {
 								eps = append(eps, status.Endpoints...)
 							}
 							if len(eps) > 0 {
-								st.Output = "Endpoints:\n"
+								var epOut string
+								epOut = "Try it out:\n"
 								for _, ep := range eps {
-									st.Output += "  " + ep + "\n"
+									epOut += "  → " + ep + "\n"
 								}
+								st.Output = epOut
+								st.Data["endpoints_summary"] = epOut
 							}
 						}
 					}
 				}
-				// Restore global view (housekeeping).
 				_ = unpinStoreStep(s)(ctx, st)
-				return err
-			}, Skip: skipIfAbortedOrNoWait},
-			// If no-wait, still restore global view.
-			{Label: "Finalize", Do: unpinStoreStep(s), Skip: func(st *registry.State) bool {
-				// Run on the normal no-wait path; also run on abort
-				// so the store unpins before the process exits.
-				if skipIfAborted(st) {
-					return false
-				}
-				return !skipIfNoWait(st)
-			}},
+				return nil
+			}, Skip: skipIfAborted},
 			// ── GitHub Actions CI setup (first-run only) ─────────
 			// Gate: a single yes/no step that runs on a first-run
 			// deploy (conf didn't pre-exist) of a GitHub-hosted repo,
@@ -353,9 +349,20 @@ func deployPre(ctx context.Context, in registry.Input) error {
 // If nothing matches, Input is left untouched and the wizard's
 // agent-path file picker prompts. The saga's resolveAgentStep
 // performs the network download as a final fallback.
-func preresolveAgentBinary(ctx context.Context, in registry.Input) {
+func preresolveAgentBinary(_ context.Context, in registry.Input) {
 	if in.Get("agent-path") != "" {
 		return // explicit flag or conf value wins
+	}
+	// Check env vars. The canonical name follows the flag convention
+	// (LIGHTSAILCTL_AGENT_PATH); also accept the more intuitive
+	// LIGHTSAILCTL_AGENT_BINARY for discoverability.
+	for _, env := range []string{"LIGHTSAILCTL_AGENT_PATH", "LIGHTSAILCTL_AGENT_BINARY"} {
+		if v := os.Getenv(env); v != "" {
+			if abs, err := filepath.Abs(v); err == nil {
+				in["agent-path"] = abs
+				return
+			}
+		}
 	}
 	// Check the per-version cache first. If a prior deploy from the
 	// same lightsailctl build already downloaded the agent, it's
@@ -579,11 +586,8 @@ func ensureAppStep(s *store) func(context.Context, *registry.State) error {
 		st.Data["bucket"] = envBucket
 		// Re-announce now that we know the region, so the TUI's
 		// regional ListBuckets merge (which strictly matches region)
-		// picks up the entry. The earlier announceEarlyStep may have
-		// fired with an empty region when the conf was bare.
-		appBucket := lightsail.AppBucketName(acct, st.Input.Get("name"))
+		// picks up the entry.
 		c.AnnounceBucket(envBucket, region)
-		c.AnnounceBucket(appBucket, region)
 		return nil
 	}
 }
@@ -612,20 +616,15 @@ func announceEarlyStep(s *store) func(context.Context, *registry.State) error {
 		}
 		st.Data["acct"] = acct
 		envBucket := lightsail.EnvBucketName(acct, st.Input.Get("name"), st.Input.Get("env"))
-		appBucket := lightsail.AppBucketName(acct, st.Input.Get("name"))
 		region := st.Input.Get("region")
 		c.AnnounceBucket(envBucket, region)
-		c.AnnounceBucket(appBucket, region)
 		return nil
 	}
 }
 
 // announceOptimisticStep seeds the shared optimistic bucket cache with
-// announceOptimisticStep seeds the shared optimistic bucket cache with
-// the env bucket (and app-config bucket) so the TUI table shows the new
-// app immediately on the next refresh, well before the real CreateBucket
-// calls finish. Values are upgraded to state=OK once the real buckets
-// come up.
+// the env bucket so the TUI table shows the new app immediately on the
+// next refresh, well before the real CreateBucket call finishes.
 
 // regionOfInstance finds the AWS region of a Lightsail instance by its
 // (globally unique) name. Uses the client as-is (already global-aware)

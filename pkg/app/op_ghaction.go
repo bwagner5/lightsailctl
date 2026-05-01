@@ -469,6 +469,11 @@ func enableSummaryStep(_ context.Context, st *registry.State) error {
 	} else if inputBool(st.Input, "dry-run") {
 		b.WriteString("Dry-run complete — no resources were created.\n")
 	}
+	// Always surface the deploy endpoints at the very end so the
+	// user sees them as the final output of the whole workflow.
+	if eps, ok := st.Data["endpoints_summary"].(string); ok {
+		b.WriteString("\n" + eps)
+	}
 	st.Output = b.String()
 	return nil
 }

@@ -25,10 +25,18 @@ type App struct {
 	Region    string
 	State     string
 	Age       string
-	Bucket    string // app-config bucket name
 	Instances string // comma-joined target instances discovered via tags
 	Endpoints string // comma-joined http://ip:port from status files
 	Status    string // rolled-up health per env (e.g. "dev: healthy (2/2)")
+
+	// envStatuses is populated by enrich (via Get) for the detail view.
+	// Not shown in the table — only used by appDetail to render per-
+	// instance container breakdowns. Keyed by env name.
+	envStatuses map[string][]lightsail.Status
+
+	// envBuckets maps env name → bucket name. Populated by aggregate
+	// so enrich can look up status files without needing the account ID.
+	envBuckets map[string]string
 }
 
 // store adapts lightsail.Client into a registry.Store. The client is built
@@ -161,12 +169,14 @@ func enrich(ctx context.Context, c *lightsail.Client, rows []any) {
 				instances[t.Name] = struct{}{}
 			}
 			// Status from env bucket (best-effort; bucket may not exist yet).
-			if a.Bucket != "" {
-				// Env bucket name: a.Bucket is the app-config bucket
-				// (ls--acct--app); the env bucket is ls--acct--app--env.
-				envBucket := a.Bucket + "--" + env
+			envBucket := a.envBuckets[env]
+			if envBucket != "" {
 				statuses, err := c.ReadBucketStatuses(ctx, envBucket)
 				if err == nil {
+					if a.envStatuses == nil {
+						a.envStatuses = map[string][]lightsail.Status{}
+					}
+					a.envStatuses[env] = statuses
 					healthy, total := 0, 0
 					for _, st := range statuses {
 						for _, ctr := range st.Containers {
@@ -215,44 +225,31 @@ func dedupeStrings(in []string) []string {
 }
 
 // aggregate rolls a flat list of app-prefixed buckets into App rows.
+// Apps are discovered by grouping env buckets by their app name prefix.
 func aggregate(buckets []lightsail.Bucket) []any {
 	byName := map[string]*App{}
 	created := map[string]time.Time{} // earliest bucket CreatedAt per app
 	for _, b := range buckets {
-		// env bucket
-		if app, env := lightsail.ParseAppEnv(b.Name); app != "" {
-			a := byName[app]
-			if a == nil {
-				a = &App{Name: app, Region: b.Region}
-				byName[app] = a
-			}
-			if a.Envs == "" {
-				a.Envs = env
-			} else {
-				a.Envs += "," + env
-			}
-			if a.State == "" || b.State != "OK" {
-				a.State = b.State
-			}
-			if !b.CreatedAt.IsZero() && (created[app].IsZero() || b.CreatedAt.Before(created[app])) {
-				created[app] = b.CreatedAt
-			}
+		app, env := lightsail.ParseAppEnv(b.Name)
+		if app == "" || env == "" {
 			continue
 		}
-		// app-config bucket
-		if app := lightsail.ParseAppFromAppBucket(b.Name); app != "" {
-			a := byName[app]
-			if a == nil {
-				a = &App{Name: app, Region: b.Region}
-				byName[app] = a
-			}
-			a.Bucket = b.Name
-			if a.State == "" {
-				a.State = b.State
-			}
-			if !b.CreatedAt.IsZero() && (created[app].IsZero() || b.CreatedAt.Before(created[app])) {
-				created[app] = b.CreatedAt
-			}
+		a := byName[app]
+		if a == nil {
+			a = &App{Name: app, Region: b.Region, envBuckets: map[string]string{}}
+			byName[app] = a
+		}
+		if a.Envs == "" {
+			a.Envs = env
+		} else {
+			a.Envs += "," + env
+		}
+		a.envBuckets[env] = b.Name
+		if a.State == "" || b.State != "OK" {
+			a.State = b.State
+		}
+		if !b.CreatedAt.IsZero() && (created[app].IsZero() || b.CreatedAt.Before(created[app])) {
+			created[app] = b.CreatedAt
 		}
 	}
 	out := make([]any, 0, len(byName))
@@ -338,8 +335,6 @@ func ResourceWithOptions(region *string, regionHints []string, nonInteractive *b
 			Table: registry.TableHint{Header: "AGE", Tick: true}},
 		{Name: "Status", Flag: "status", Help: "rolled-up health",
 			Table: registry.TableHint{Header: "STATUS"}},
-		{Name: "Bucket", Flag: "bucket", Help: "app config bucket",
-			Table: registry.TableHint{Header: "BUCKET", Wide: true}},
 		{Name: "Instances", Flag: "instances", Help: "target instances",
 			Table: registry.TableHint{Header: "INSTANCES", Wide: true}},
 		{Name: "Endpoints", Flag: "endpoints", Help: "live endpoints",

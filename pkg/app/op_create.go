@@ -10,6 +10,7 @@ import (
 	"github.com/bwagner5/triad/pkg/registry"
 
 	"github.com/aws/lightsailctl/pkg/config"
+	"github.com/aws/lightsailctl/pkg/instance"
 	"github.com/aws/lightsailctl/pkg/lightsail"
 	"github.com/aws/lightsailctl/pkg/names"
 )
@@ -29,25 +30,89 @@ import (
 //  8. SSH `lightsailctl app local up ...`
 //  9. Save lightsail.conf in cwd and print the non-interactive command.
 func createOp(s *store) registry.Operation {
+	// Shared state for new-instance field closures (same pattern as deployOp).
+	var (
+		niStore    = instance.NewStore(s.region, s.regionHints)
+		niBpType   = "os"
+		niPlatform = "LINUX_UNIX"
+	)
+	niBpSuggest, niBpValidate := niBlueprintSuggestAndValidate(niStore, &niBpType, &niPlatform)
+
+	wantsNew := func(in registry.Input) bool {
+		v, _ := in.Bool("create-new-instance")
+		return v
+	}
+	wantsExisting := func(in registry.Input) bool {
+		v, _ := in.Bool("create-new-instance")
+		return !v && in.Get("instance") == ""
+	}
+	askStrategy := func(in registry.Input) bool {
+		return in.Get("instance") == ""
+	}
+
 	return registry.Operation{
 		Name: "create", Key: "c", Short: "create a new Lightsail application",
 		Confirm: "Create this Lightsail application?",
 		Fields: []registry.Field{
-			{Flag: "name", Short: "n", Help: "app name", Prefill: names.DefaultAppName,
+			{Flag: "name", Short: "n", Label: "App name", Help: "app name", Prefill: names.DefaultAppName,
 				Required: true, Validate: names.ValidateLabel},
-			{Flag: "env", Short: "e", Help: "environment", Default: "dev", Required: true, Validate: names.ValidateLabel},
-			{Flag: "instance", Help: "target Lightsail instance",
-				Required: true, Suggest: instanceSuggest(s)},
-			{Flag: "agent-path", Help: "lightsailctl binary to scp to the instance (linux/amd64)",
-				Required: true, File: true},
+			{Flag: "env", Short: "e", Label: "Environment", Help: "environment", Default: "dev",
+				Required: true, Validate: names.ValidateLabel},
+
+			// ── Instance target ──────────────────────────────────
+			{Flag: "create-new-instance", Label: "Target",
+				Help: "use an existing instance or create a new one",
+				Kind: registry.KindBool, Required: true, When: askStrategy,
+				Suggest: yesNoSuggest(
+					"pick an existing instance",
+					"create a new instance")},
+			{Flag: "instance", Label: "Lightsail instance",
+				Help: "target Lightsail instance",
+				Required: true, When: wantsExisting,
+				Suggest: instanceSuggest(s)},
+
+			// ── New instance fields ──────────────────────────────
+			{Flag: "__ni/name", Label: "Instance name", Help: "instance name",
+				Required: true, When: wantsNew,
+				Prefill: names.Random, Validate: names.ValidateLabel},
+			{Flag: "__ni/region", Label: "Region", Help: "AWS region",
+				Required: true, When: wantsNew,
+				Default: "us-east-1", Suggest: niRegionSuggest(niStore)},
+			{Flag: "__ni/blueprint-type", Label: "Blueprint category",
+				Help: "blueprint category", Default: "os", When: wantsNew,
+				Suggest:  niBlueprintTypeSuggest(),
+				Validate: func(v string) error { niBpType = v; return nil }},
+			{Flag: "__ni/blueprint", Label: "Blueprint", Help: "OS / image",
+				Required: true, When: wantsNew,
+				Default: "amazon_linux_2023", Suggest: niBpSuggest, Validate: niBpValidate},
+			{Flag: "__ni/bundle", Label: "Instance size", Help: "instance size",
+				Required: true, When: wantsNew,
+				Default: "micro_x_x", Suggest: niBundleSuggest(niStore, &niPlatform)},
+			{Flag: "__ni/ip-address-type", Label: "Networking",
+				Help: "networking stack", Default: "dualstack", When: wantsNew,
+				Suggest: niIPTypeSuggest()},
+			{Flag: "__ni/user-data", Label: "Launch script",
+				Help: "launch script", When: wantsNew, File: true},
+			{Flag: "__ni/monitoring", Label: "Detailed monitoring",
+				Help: "detailed monitoring", Default: "false",
+				Kind: registry.KindBool, When: wantsNew,
+				Suggest: niMonitoringSuggest()},
+
+			{Flag: "agent-path", Label: "Agent binary",
+				Help: "lightsailctl binary to scp to the instance (linux/amd64)",
+				File: true, When: needsAgentBinaryPrompt},
 			{Flag: "region", Help: "AWS region (auto-filled from --instance)",
 				Wizard: registry.BoolPtr(false)},
 		},
+		Pre: createPreResolveAgent,
 		Steps: []registry.Step{
+			{Label: "Resolve deployment target", Do: applyStrategyStep(s)},
+			{Label: "Create new Lightsail instance",
+				Do:   createNewInstanceInlineStep(s),
+				Skip: skipUnlessCreatingNewInstance},
 			{Label: "Resolve region from instance", Do: resolveRegionStep(s)},
 			{Label: "Pin region", Do: pinRegionStep(s), Undo: unpinStoreStep(s)},
-			{Label: "Verify agent binary exists", Do: verifyAgentStep},
-			{Label: "Create app-config bucket", Do: createAppBucketStep(s)},
+			{Label: "Resolve agent binary", Do: resolveAgentStep},
 			{Label: "Create env bucket", Do: createEnvBucketStep(s)},
 			{Label: "Tag target instance", Do: tagInstanceStep(s), Undo: untagInstanceUndo(s)},
 			{Label: "Grant instance bucket access", Do: grantAccessStep(s), Undo: revokeAccessUndo(s)},
@@ -58,6 +123,15 @@ func createOp(s *store) registry.Operation {
 			{Label: "Restore global view", Do: unpinStoreStep(s)},
 		},
 	}
+}
+
+// createPreResolveAgent pre-resolves the agent binary so the wizard
+// can skip the agent-path prompt when a cached or local build exists.
+// Unlike deploy, create does NOT preload from lightsail.conf — it's
+// creating a fresh app and should prompt for everything.
+func createPreResolveAgent(_ context.Context, in registry.Input) error {
+	preresolveAgentBinary(context.Background(), in)
+	return nil
 }
 
 // ── Suggests ──────────────────────────────────────────────────────────
@@ -141,19 +215,7 @@ func pinRegionStep(s *store) func(context.Context, *registry.State) error {
 	}
 }
 
-func verifyAgentStep(_ context.Context, st *registry.State) error {
-	p := st.Input.Get("agent-path")
-	fi, err := os.Stat(p)
-	if err != nil {
-		return fmt.Errorf("agent binary not found at %s: %w", p, err)
-	}
-	if fi.IsDir() || fi.Size() == 0 {
-		return fmt.Errorf("agent binary at %s is not a regular file", p)
-	}
-	return nil
-}
-
-func createAppBucketStep(s *store) func(context.Context, *registry.State) error {
+func createEnvBucketStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		c, err := s.ensure(ctx)
 		if err != nil {
@@ -164,17 +226,6 @@ func createAppBucketStep(s *store) func(context.Context, *registry.State) error 
 			return err
 		}
 		st.Data["acct"] = acct
-		return c.CreateBucket(ctx, lightsail.AppBucketName(acct, st.Input.Get("name")))
-	}
-}
-
-func createEnvBucketStep(s *store) func(context.Context, *registry.State) error {
-	return func(ctx context.Context, st *registry.State) error {
-		c, err := s.ensure(ctx)
-		if err != nil {
-			return err
-		}
-		acct := st.Data["acct"].(string)
 		bucket := lightsail.EnvBucketName(acct, st.Input.Get("name"), st.Input.Get("env"))
 		if err := c.CreateBucket(ctx, bucket); err != nil {
 			return err
