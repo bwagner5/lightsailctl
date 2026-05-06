@@ -358,6 +358,7 @@ func ResourceWithOptions(region *string, regionHints []string, nonInteractive *b
 			"deploy":            deployOp(st),
 			"logs":              logsOp(st, suggest),
 			"add-target":        addTargetOp(st),
+			"remove-target":     removeTargetOp(st, suggest),
 			"enable-gh-action":  enableGhActionOp(st, suggest),
 			"disable-gh-action": disableGhActionOp(st, suggest),
 		},

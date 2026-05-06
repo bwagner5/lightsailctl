@@ -111,6 +111,15 @@ func (c *Client) TagInstance(ctx context.Context, instance, key, value string) e
 	return err
 }
 
+// UntagInstance removes a single tag key from the instance.
+func (c *Client) UntagInstance(ctx context.Context, instance, key string) error {
+	_, err := c.ls.UntagResource(ctx, &lightsail.UntagResourceInput{
+		ResourceName: aws.String(instance),
+		TagKeys:      []string{key},
+	})
+	return err
+}
+
 func toInstance(in *lstypes.Instance) Instance {
 	out := Instance{
 		Name:      aws.ToString(in.Name),
