@@ -188,7 +188,11 @@ func enrich(ctx context.Context, c *lightsail.Client, rows []any) {
 						endpoints = append(endpoints, st.Endpoints...)
 					}
 					if total > 0 {
-						statusParts = append(statusParts, fmt.Sprintf("%s: %d/%d", env, healthy, total))
+						if len(statuses) > 1 {
+							statusParts = append(statusParts, fmt.Sprintf("%s: %d/%d on %d instances", env, healthy, total, len(statuses)))
+						} else {
+							statusParts = append(statusParts, fmt.Sprintf("%s: %d/%d", env, healthy, total))
+						}
 					}
 				} else {
 					a.envStatuses[env] = nil

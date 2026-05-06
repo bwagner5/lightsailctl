@@ -199,6 +199,40 @@ func TestStatusBadgeUnknownFallsBack(t *testing.T) {
 	}
 }
 
+func TestAppDetailMultiInstance(t *testing.T) {
+	now := time.Now()
+	view := appDetail(App{
+		Name: "api",
+		Envs: "dev",
+		envStatuses: map[string][]lightsail.Status{
+			"dev": {
+				{
+					Instance: "box-1", Status: "healthy",
+					LastDeploy: &lightsail.DeployInfo{Timestamp: now.Add(-2 * time.Minute)},
+					Containers: []lightsail.ContainerStatus{
+						{Service: "web", Status: "running", StartedAt: now.Add(-2 * time.Minute)},
+					},
+				},
+				{
+					Instance: "box-2", Status: "healthy",
+					LastDeploy: &lightsail.DeployInfo{Timestamp: now.Add(-1 * time.Minute)},
+					Containers: []lightsail.ContainerStatus{
+						{Service: "web", Status: "running", StartedAt: now.Add(-1 * time.Minute)},
+					},
+				},
+			},
+		},
+	})
+	// Both instances should appear as separate sections.
+	instances := collectRows(view, "Instance")
+	if len(instances) != 2 {
+		t.Fatalf("expected 2 Instance rows; got %d: %v", len(instances), instances)
+	}
+	if !contains(instances, "box-1") || !contains(instances, "box-2") {
+		t.Errorf("instances = %v; want box-1 and box-2", instances)
+	}
+}
+
 func TestShowImage(t *testing.T) {
 	cases := []struct {
 		img  string

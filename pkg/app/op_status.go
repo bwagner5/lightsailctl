@@ -153,8 +153,11 @@ func renderShort(w io.Writer, rep Report) error {
 				overall = s.Status
 			}
 		}
+		nInst := len(er.Statuses)
 		if total == 0 {
 			fw.printf("%s: %s\n", er.Env, overall)
+		} else if nInst > 1 {
+			fw.printf("%s: %s (%d/%d on %d instances)\n", er.Env, overall, running, total, nInst)
 		} else {
 			fw.printf("%s: %s (%d/%d)\n", er.Env, overall, running, total)
 		}

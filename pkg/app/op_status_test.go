@@ -72,3 +72,50 @@ func TestRenderJSON(t *testing.T) {
 		t.Errorf("roundtrip lost data: %+v", got)
 	}
 }
+
+func multiInstanceReport() Report {
+	return Report{
+		App: "foo",
+		Envs: []EnvReport{
+			{
+				Env: "dev", Bucket: "ls--123--foo--dev",
+				Statuses: []lightsail.Status{
+					{
+						Instance: "box-1", Status: "healthy", Timestamp: time.Unix(0, 0).UTC(),
+						Containers: []lightsail.ContainerStatus{
+							{Name: "web", Status: "running"},
+						},
+					},
+					{
+						Instance: "box-2", Status: "healthy", Timestamp: time.Unix(0, 0).UTC(),
+						Containers: []lightsail.ContainerStatus{
+							{Name: "web", Status: "running"},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestRenderShortMultiInstance(t *testing.T) {
+	var buf bytes.Buffer
+	if err := renderStatusTo(&buf, "short", multiInstanceReport()); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "dev: healthy (2/2 on 2 instances)") {
+		t.Errorf("missing multi-instance line: %s", out)
+	}
+}
+
+func TestRenderWideMultiInstance(t *testing.T) {
+	var buf bytes.Buffer
+	if err := renderStatusTo(&buf, "wide", multiInstanceReport()); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "box-1") || !strings.Contains(out, "box-2") {
+		t.Errorf("wide missing instance names:\n%s", out)
+	}
+}
