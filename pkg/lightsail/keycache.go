@@ -5,6 +5,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/lightsail"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
@@ -16,7 +19,6 @@ type cachedKey struct {
 }
 
 // KeyDeleteFunc is called by Close to release each cached key.
-// Signature matches the cleanup needs: (ctx, region, bucket, accessKeyID, s3cli).
 type KeyDeleteFunc func(ctx context.Context, region, bucket, accessKeyID string, s3cli *s3.Client)
 
 // KeyCache holds pre-fetched bucket access keys so S3ClientFor can skip
@@ -66,7 +68,6 @@ func (kc *KeyCache) Close() {
 		return
 	}
 	kc.closed = true
-	// Snapshot and clear under lock, then release outside lock.
 	snapshot := kc.keys
 	kc.keys = map[string]*cachedKey{}
 	kc.mu.Unlock()
@@ -77,5 +78,29 @@ func (kc *KeyCache) Close() {
 		if kc.deleteFn != nil {
 			kc.deleteFn(ctx, ck.region, bucket, ck.key.AccessKey, ck.s3cli)
 		}
+	}
+}
+
+// sharedKeyCache is a process-level cache shared across all Client instances
+// (including WithRegion copies). Close is called at process shutdown to
+// release all held keys.
+var sharedKeyCache = NewKeyCache(func(ctx context.Context, region, bucket, accessKeyID string, s3cli *s3.Client) {
+	// Remove ownership marker first so racing clients see a freed slot.
+	_ = deleteOwnership(ctx, s3cli, bucket, accessKeyID)
+	// Delete the access key via Lightsail API. Best-effort.
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	if err != nil {
+		return
+	}
+	_, _ = lightsail.NewFromConfig(cfg).DeleteBucketAccessKey(ctx, &lightsail.DeleteBucketAccessKeyInput{
+		BucketName:  aws.String(bucket),
+		AccessKeyId: aws.String(accessKeyID),
+	})
+})
+
+// CloseKeyCache releases all cached bucket access keys. Call on shutdown.
+func (c *Client) CloseKeyCache() {
+	if c.keyCache != nil {
+		c.keyCache.Close()
 	}
 }

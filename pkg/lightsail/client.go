@@ -33,6 +33,10 @@ type Client struct {
 	// cache is process-shared; this field avoids redoing the disk read
 	// per call.
 	regions *regionsCache
+	// keyCache holds pre-fetched bucket access keys so S3ClientFor can
+	// skip the expensive CreateBucketAccessKey round-trip on cache hit.
+	// Shared across WithRegion copies via pointer.
+	keyCache *KeyCache
 }
 
 // Options configures Client construction.
@@ -106,6 +110,7 @@ func NewWithOptions(ctx context.Context, opts Options) (*Client, error) {
 		sts:         sts.NewFromConfig(cfg),
 		regionHints: opts.RegionHints,
 		optimistic:  sharedOptimisticCache,
+		keyCache:    sharedKeyCache,
 	}
 	if cfg.Region != "" {
 		c.ls = lightsail.NewFromConfig(cfg)
@@ -128,7 +133,7 @@ func (c *Client) Config() aws.Config { return c.cfg }
 func (c *Client) WithRegion(region string) *Client {
 	cfg := c.cfg.Copy()
 	cfg.Region = region
-	out := &Client{cfg: cfg, sts: sts.NewFromConfig(cfg), regionHints: c.regionHints, optimistic: c.optimistic, regions: c.regions}
+	out := &Client{cfg: cfg, sts: sts.NewFromConfig(cfg), regionHints: c.regionHints, optimistic: c.optimistic, regions: c.regions, keyCache: c.keyCache}
 	if region != "" {
 		out.ls = lightsail.NewFromConfig(cfg)
 	}

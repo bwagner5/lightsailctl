@@ -92,17 +92,28 @@ func (c *Client) DeleteBucketKey(ctx context.Context, bucket, accessKeyID string
 
 // S3ClientFor returns an *s3.Client scoped to a single Lightsail bucket via a
 // freshly-minted access key, plus a cleanup func the caller must defer.
+// If a cached key exists, returns it immediately with a no-op cleanup.
 func (c *Client) S3ClientFor(ctx context.Context, bucket string) (*s3.Client, func(), error) {
+	// Check cache first.
+	if c.keyCache != nil {
+		if s3cli, ok := c.keyCache.Get(bucket); ok {
+			return s3cli, func() {}, nil
+		}
+	}
 	key, err := c.CreateBucketKey(ctx, bucket)
 	if err != nil {
 		return nil, nil, err
 	}
 	s3cli := s3AdminClient(c.cfg.Region, key)
+	// Store in cache; cache owns the lifecycle now.
+	if c.keyCache != nil {
+		c.keyCache.Put(bucket, key, s3cli, c.cfg.Region)
+		return s3cli, func() {}, nil
+	}
+	// No cache — legacy cleanup path.
 	cleanup := func() {
-		// Fresh short-lived context so a cancelled caller ctx doesn't skip cleanup.
 		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		// Remove the ownership marker first (so a racing client sees a freed slot).
 		_ = deleteOwnership(cctx, s3cli, bucket, key.AccessKey)
 		_ = c.DeleteBucketKey(cctx, bucket, key.AccessKey)
 	}
