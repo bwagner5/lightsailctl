@@ -35,6 +35,7 @@ type Config struct {
 	Env       string   `yaml:"env"`
 	Region    string   `yaml:"region,omitempty"`
 	Instance  string   `yaml:"instance,omitempty"`
+	Instances []string `yaml:"instances,omitempty"`
 	AgentPath string   `yaml:"agent-path,omitempty"`
 	Ignore    []string `yaml:"ignore,omitempty"`
 
@@ -64,6 +65,28 @@ type PendingInstance struct {
 	IPAddressType string `yaml:"ip-address-type,omitempty"`
 	UserData      string `yaml:"user-data,omitempty"`
 	Monitoring    string `yaml:"monitoring,omitempty"`
+}
+
+// AllInstances returns the deduplicated union of Instance and Instances.
+// Instance (the legacy single-target field) is always first if set.
+func (c *Config) AllInstances() []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(s string) {
+		if s == "" {
+			return
+		}
+		if _, ok := seen[s]; ok {
+			return
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	add(c.Instance)
+	for _, inst := range c.Instances {
+		add(inst)
+	}
+	return out
 }
 
 // Find walks up from start looking for lightsail.conf. Returns the path or
@@ -116,12 +139,18 @@ func LoadFromCwd() (*Config, error) {
 }
 
 // Save writes the Config as YAML. Creates parent directories if needed.
+// When Instances is populated, Instance is kept in sync with the first
+// entry for backward compatibility with older CLI versions.
 func (c *Config) Save(path string) error {
 	if path == "" {
 		if c.Path == "" {
 			return errors.New("save: no path set")
 		}
 		path = c.Path
+	}
+	// Keep Instance in sync with Instances[0] for backward compat.
+	if len(c.Instances) > 0 && c.Instance != c.Instances[0] {
+		c.Instance = c.Instances[0]
 	}
 	data, err := yaml.Marshal(c)
 	if err != nil {
