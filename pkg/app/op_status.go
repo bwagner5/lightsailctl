@@ -19,7 +19,7 @@ import (
 // absent, show every env for the app.
 func statusOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
 	return registry.Operation{
-		Name: "status", Key: "s", Short: "show app/env health",
+		Name: "status", Short: "show app/env health",
 		Fields: []registry.Field{
 			{Flag: "name", Short: "n", Help: "app name", Required: true, Suggest: suggest},
 			{Flag: "env", Short: "e", Help: "environment (blank = all envs)",
