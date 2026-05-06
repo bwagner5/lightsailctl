@@ -375,6 +375,20 @@ func saveConfigStep(ctx context.Context, st *registry.State) error {
 	}
 	if existing != nil {
 		cfg.Ignore = existing.Ignore
+		cfg.Instances = existing.Instances
+	}
+	// Ensure the current instance is in the Instances list.
+	if inst := cfg.Instance; inst != "" {
+		found := false
+		for _, i := range cfg.Instances {
+			if i == inst {
+				found = true
+				break
+			}
+		}
+		if !found {
+			cfg.Instances = append(cfg.Instances, inst)
+		}
 	}
 	// Persist the create-new-instance draft when the deploy is
 	// aborted before the instance actually gets created. Next run

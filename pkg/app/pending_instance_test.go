@@ -208,3 +208,76 @@ func TestSaveConfigStep_DropsPendingOnSuccessfulCreate(t *testing.T) {
 		t.Fatal(serr)
 	}
 }
+
+// TestSaveConfigStep_PreservesInstancesList verifies that saveConfigStep
+// preserves the existing Instances list and adds the current instance.
+func TestSaveConfigStep_PreservesInstancesList(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	// Seed a conf with an existing instances list.
+	cfg := &config.Config{
+		App: "hello", Env: "dev", Region: "us-east-1",
+		Instance:  "box-1",
+		Instances: []string{"box-1", "box-2"},
+	}
+	if err := cfg.Save(filepath.Join(dir, config.Filename)); err != nil {
+		t.Fatal(err)
+	}
+
+	st := &registry.State{
+		Input: registry.Input{
+			"name":     "hello",
+			"env":      "dev",
+			"region":   "us-east-1",
+			"instance": "box-1",
+		},
+		Data: map[string]any{},
+	}
+	if err := saveConfigStep(context.Background(), st); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(filepath.Join(dir, config.Filename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Instances) != 2 || got.Instances[0] != "box-1" || got.Instances[1] != "box-2" {
+		t.Errorf("Instances = %v; want [box-1 box-2]", got.Instances)
+	}
+}
+
+// TestSaveConfigStep_AddsNewInstance verifies that saveConfigStep adds
+// the current instance to the list if not already present.
+func TestSaveConfigStep_AddsNewInstance(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	cfg := &config.Config{
+		App: "hello", Env: "dev", Region: "us-east-1",
+		Instance:  "box-1",
+		Instances: []string{"box-1"},
+	}
+	if err := cfg.Save(filepath.Join(dir, config.Filename)); err != nil {
+		t.Fatal(err)
+	}
+
+	st := &registry.State{
+		Input: registry.Input{
+			"name":     "hello",
+			"env":      "dev",
+			"region":   "us-east-1",
+			"instance": "box-3",
+		},
+		Data: map[string]any{},
+	}
+	if err := saveConfigStep(context.Background(), st); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(filepath.Join(dir, config.Filename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Instances) != 2 || got.Instances[0] != "box-1" || got.Instances[1] != "box-3" {
+		t.Errorf("Instances = %v; want [box-1 box-3]", got.Instances)
+	}
+}
