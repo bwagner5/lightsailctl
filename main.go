@@ -86,6 +86,14 @@ func Run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	// tail step can skip itself under -y. See ResourceWithOptions.
 	reg.Register(app.ResourceWithOptions(&region, regionHints, &g.NonInteractive))
 	reg.Register(instance.Resource(&region, regionHints))
+	// Release cached resources (e.g., bucket access keys) on exit.
+	defer func() {
+		for _, r := range reg.All() {
+			if r.Shutdown != nil {
+				r.Shutdown()
+			}
+		}
+	}()
 
 	root := cli.Build(cliName, "Amazon Lightsail CLI", reg, g)
 	root.SetOut(stdout)

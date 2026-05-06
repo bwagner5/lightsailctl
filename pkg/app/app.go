@@ -132,6 +132,14 @@ func (s *store) StreamList(ctx context.Context, _ registry.Filter) <-chan regist
 			if len(appBuckets) == 0 {
 				continue
 			}
+			// Pre-fetch bucket access keys in the background so detail
+			// views and status reads are instant cache hits.
+			bucketNames := make([]string, len(appBuckets))
+			for i, bkt := range appBuckets {
+				bucketNames[i] = bkt.Name
+			}
+			c.WithRegion(b.Region).WarmKeyCache(ctx, bucketNames)
+
 			rows := aggregate(appBuckets)
 			// Ship rows immediately. enrich used to run synchronously
 			// before publishing, adding per-app AWS calls
@@ -356,6 +364,11 @@ func ResourceWithOptions(region *string, regionHints []string, nonInteractive *b
 		Fields:  fields,
 		Store:   st,
 		Detail:  appDetail,
+		Shutdown: func() {
+			if st.client != nil {
+				st.client.CloseKeyCache()
+			}
+		},
 		Operations: map[string]registry.Operation{
 			"create":            createOp(st),
 			"delete":            deleteOp(st, suggest),
