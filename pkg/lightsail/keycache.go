@@ -104,3 +104,53 @@ func (c *Client) CloseKeyCache() {
 		c.keyCache.Close()
 	}
 }
+
+// WarmKeyCache pre-fetches access keys for the given buckets in the background.
+// Errors are silently swallowed. Buckets already in the cache are skipped.
+func (c *Client) WarmKeyCache(ctx context.Context, buckets []string) {
+	if c.keyCache != nil {
+		c.keyCache.Warm(ctx, c, buckets)
+	}
+}
+
+// Warm pre-fetches access keys for buckets concurrently in the background.
+// All errors (including key-limit exhaustion) are silently swallowed.
+func (kc *KeyCache) Warm(ctx context.Context, c *Client, buckets []string) {
+	go func() {
+		sem := make(chan struct{}, 5)
+		var wg sync.WaitGroup
+		for _, bucket := range buckets {
+			if _, ok := kc.Get(bucket); ok {
+				continue // already cached
+			}
+			kc.mu.Lock()
+			closed := kc.closed
+			kc.mu.Unlock()
+			if closed {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(b string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				// Need a region-pinned client. Derive region from bucket
+				// by looking it up, or use the client's current region.
+				// Since Warm is called per-region batch from StreamList,
+				// c is already region-pinned.
+				key, err := c.CreateBucketKey(ctx, b)
+				if err != nil {
+					return // silently swallow
+				}
+				s3cli := s3AdminClient(c.cfg.Region, key)
+				kc.Put(b, key, s3cli, c.cfg.Region)
+			}(bucket)
+		}
+		wg.Wait()
+	}()
+}

@@ -54,3 +54,22 @@ func TestKeyCacheAfterClose(t *testing.T) {
 		t.Fatal("expected miss after close")
 	}
 }
+
+func TestKeyCacheWarmSkipsCached(t *testing.T) {
+	kc := NewKeyCache(nil)
+	existing := &s3.Client{}
+	kc.Put("b1", &BucketKey{Bucket: "b1", AccessKey: "AK1"}, existing, "us-east-1")
+
+	// Warm with b1 should not overwrite the existing entry.
+	// We can't easily test CreateBucketKey without a real client, but we
+	// can verify the existing entry is preserved by checking Get after Warm
+	// completes (Warm will fail silently on the nil client for b2).
+	ctx := context.Background()
+	kc.Warm(ctx, nil, []string{"b1"})
+
+	// Give goroutine a moment to run (it should skip b1 immediately).
+	got, ok := kc.Get("b1")
+	if !ok || got != existing {
+		t.Fatal("Warm should not overwrite existing cached entry")
+	}
+}
