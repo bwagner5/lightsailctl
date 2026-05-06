@@ -20,6 +20,7 @@ import (
 func addTargetOp(s *store) registry.Operation {
 	return registry.Operation{
 		Name:  "add-target",
+		Key:   "t",
 		Short: "add an instance as a deployment target",
 		Fields: []registry.Field{
 			{Flag: "name", Short: "n", Label: "App name", Help: "app name",
