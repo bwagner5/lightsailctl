@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -159,7 +160,7 @@ func (c *Client) Regions(ctx context.Context) ([]Region, error) {
 	// the same order (picker, fan-out), and the sort is stable.
 	sortRegions(regs)
 	c.regions.loaded = regs
-	trace.Log("lightsail.Regions.load", "source", source, "count", len(regs))
+	trace.Trace(ctx, "lightsail regions loaded", "source", source, "count", len(regs))
 	return regs, nil
 }
 
@@ -169,7 +170,7 @@ func (c *Client) Regions(ctx context.Context) ([]Region, error) {
 // snapshot is the universal fallback.
 func (c *Client) resolveRegions(ctx context.Context) ([]Region, string) {
 	// Disk first — by far the common case after the first run.
-	if regs, ok := readDiskCache(); ok {
+	if regs, ok := readDiskCache(ctx); ok {
 		return regs, "disk"
 	}
 	// Disk miss or stale: try the live API.
@@ -177,7 +178,8 @@ func (c *Client) resolveRegions(ctx context.Context) ([]Region, string) {
 		if werr := writeDiskCache(regs, c.fetchSourceRegion()); werr != nil {
 			// Cache write failing is not fatal; the next cold start
 			// will just hit the API again.
-			trace.Log("lightsail.Regions.writeCache.err", "err", werr.Error())
+			trace.FromContext(ctx).WarnContext(ctx, "regions cache write failed",
+				slog.Any("err", werr))
 		}
 		return regs, "api"
 	}
@@ -188,7 +190,8 @@ func (c *Client) resolveRegions(ctx context.Context) ([]Region, string) {
 		// Snapshot is embedded at compile-time; a parse failure would
 		// be a build-broken release, not a runtime condition, but we
 		// still log it rather than panic.
-		trace.Log("lightsail.Regions.snapshot.err", "err", err.Error())
+		trace.FromContext(ctx).ErrorContext(ctx, "regions snapshot parse failed",
+			slog.Any("err", err))
 		return nil, "empty"
 	}
 	return regs, "snapshot"
@@ -311,7 +314,7 @@ func fromAPIRegions(in []types.Region) []Region {
 // expired, parse error, empty list. Callers treat a miss as "refetch";
 // we deliberately do not bubble the error because none of these cases
 // are interesting to users.
-func readDiskCache() ([]Region, bool) {
+func readDiskCache(ctx context.Context) ([]Region, bool) {
 	path, err := regionsCachePath()
 	if err != nil {
 		return nil, false
@@ -322,7 +325,11 @@ func readDiskCache() ([]Region, bool) {
 	}
 	var raw diskCacheJSON
 	if err := json.Unmarshal(b, &raw); err != nil {
-		trace.Log("lightsail.Regions.cache.corrupt", "path", path, "err", err.Error())
+		// Corrupt cache is promoted to WARN: this is a real data
+		// problem (an invalid file on disk) that callers need to
+		// know about, even though we degrade gracefully.
+		trace.FromContext(ctx).WarnContext(ctx, "regions cache corrupt",
+			slog.String("path", path), slog.Any("err", err))
 		return nil, false
 	}
 	if raw.Version != diskCacheVersion {

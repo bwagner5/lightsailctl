@@ -22,6 +22,8 @@ func logsOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) 
 			{Flag: "name", Short: "n", Help: "app name", Required: true, Suggest: suggest},
 			{Flag: "env", Short: "e", Help: "environment", Default: "dev",
 				Suggest: envSuggest(s)},
+			{Flag: "lines", Help: "number of lines to show", Default: "200"},
+			{Flag: "service", Short: "s", Help: "filter to a specific compose service"},
 		},
 		Run: func(ctx context.Context, in registry.Input) error {
 			c, err := s.ensure(ctx)
@@ -42,8 +44,11 @@ func logsOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) 
 			}
 			defer creds.Remove()
 
-			remote := fmt.Sprintf("sudo /usr/local/bin/lightsailctl app local logs --app %s --env %s -f",
-				in.Get("name"), in.Get("env"))
+			remote := fmt.Sprintf("sudo /usr/local/bin/lightsailctl app local logs --app %s --env %s --lines %s -f",
+				in.Get("name"), in.Get("env"), in.Get("lines"))
+			if svc := in.Get("service"); svc != "" {
+				remote += " --service " + svc
+			}
 			args := append(lightsail.SSHOpts(creds.KeyPath),
 				"-t", creds.Username+"@"+creds.Host, remote)
 			cmd := exec.CommandContext(ctx, "ssh", args...)

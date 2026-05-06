@@ -172,10 +172,10 @@ func enrich(ctx context.Context, c *lightsail.Client, rows []any) {
 			envBucket := a.envBuckets[env]
 			if envBucket != "" {
 				statuses, err := c.ReadBucketStatuses(ctx, envBucket)
+				if a.envStatuses == nil {
+					a.envStatuses = map[string][]lightsail.Status{}
+				}
 				if err == nil {
-					if a.envStatuses == nil {
-						a.envStatuses = map[string][]lightsail.Status{}
-					}
 					a.envStatuses[env] = statuses
 					healthy, total := 0, 0
 					for _, st := range statuses {
@@ -190,6 +190,8 @@ func enrich(ctx context.Context, c *lightsail.Client, rows []any) {
 					if total > 0 {
 						statusParts = append(statusParts, fmt.Sprintf("%s: %d/%d", env, healthy, total))
 					}
+				} else {
+					a.envStatuses[env] = nil
 				}
 			}
 		}
@@ -352,7 +354,6 @@ func ResourceWithOptions(region *string, regionHints []string, nonInteractive *b
 		Detail:  appDetail,
 		Operations: map[string]registry.Operation{
 			"create":            createOp(st),
-			"status":            statusOp(st, suggest),
 			"delete":            deleteOp(st, suggest),
 			"deploy":            deployOp(st),
 			"logs":              logsOp(st, suggest),

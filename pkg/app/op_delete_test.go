@@ -14,7 +14,7 @@ import (
 
 func TestDeleteOpRunsRemoteDownBeforeUntag(t *testing.T) {
 	op := deleteOp(&store{}, nil)
-	var remoteDown, untag int = -1, -1
+	var remoteDown, untag = -1, -1
 	for i, step := range op.Steps {
 		switch step.Label {
 		case "Stop remote app services":

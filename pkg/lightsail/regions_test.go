@@ -1,6 +1,7 @@
 package lightsail
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -236,7 +237,7 @@ func TestDiskCacheVersionMismatch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "regions.json"), bogus, 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, ok := readDiskCache(); ok {
+	if _, ok := readDiskCache(context.Background()); ok {
 		t.Error("readDiskCache accepted version=999 entry; expected rejection")
 	}
 }

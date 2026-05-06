@@ -12,7 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -26,7 +26,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/bwagner5/triad/pkg/trace"
 
+	"github.com/aws/lightsailctl/internal/logging"
 	"github.com/aws/lightsailctl/pkg/lightsail"
 )
 
@@ -52,15 +54,31 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.KeepPrevious <= 0 {
 		opts.KeepPrevious = 3
 	}
+	// The watcher runs under systemd; journald captures stderr. Stamp
+	// ui=watch so every log line carries the surface for filtering.
+	ctx = trace.WithUI(ctx, "watch")
+	log := trace.FromContext(ctx)
 	baseDir := filepath.Join(lightsail.BaseDir, opts.App, opts.Env)
 	bucket, err := readBucket(baseDir)
 	if err != nil {
+		log.ErrorContext(ctx, "watcher read bucket failed",
+			slog.String("app", opts.App), slog.String("env", opts.Env),
+			slog.Any("err", err))
 		return err
 	}
-	log.Printf("watcher starting: app=%s env=%s bucket=%s interval=%s",
-		opts.App, opts.Env, bucket, opts.Interval)
+	log.InfoContext(ctx, "watcher starting",
+		slog.String("app", opts.App), slog.String("env", opts.Env),
+		slog.String("bucket", bucket),
+		slog.String("prefix", lightsail.DeployPrefix),
+		slog.String("region", opts.Region),
+		slog.Duration("interval", opts.Interval))
 
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(opts.Region))
+	// Route the AWS SDK's own logs through our slog pipeline so they
+	// surface alongside watcher events in journalctl.
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion(opts.Region),
+		config.WithLogger(logging.AWSLogger(log)),
+	)
 	if err != nil {
 		return fmt.Errorf("load AWS config (IMDS): %w", err)
 	}
@@ -73,47 +91,141 @@ func Run(ctx context.Context, opts Options) error {
 	_ = os.MkdirAll(baseDir, 0o755)
 	lastKey, _ := readLine(stateFile)
 
+	if lastKey != "" {
+		log.InfoContext(ctx, "resuming from previous deployment",
+			slog.String("last_key", lastKey))
+	} else {
+		log.InfoContext(ctx, "no previous deployment found, starting fresh")
+	}
+
 	// Initial status upload so `app status` shows something immediately.
-	writeStatus(ctx, svc, bucket, opts.Region, instance, lastKey, currentDir)
+	writeStatus(ctx, log, svc, bucket, opts.Region, instance, lastKey, currentDir)
 
 	ticker := time.NewTicker(opts.Interval)
 	defer ticker.Stop()
 	var lastStatusBody string
 	var lastStatusAt time.Time
 
+	log.InfoContext(ctx, "watcher ready, entering poll loop",
+		slog.String("instance", instance),
+		slog.String("last_deploy", lastKey))
+
+	// lastPoll tracks the outcome of the most recent poll so we can log
+	// transitions at Info level and repeats at Trace. Without this, an
+	// empty bucket (the common "waiting for first deploy" case) would
+	// be completely silent.
+	var lastPoll pollOutcome
+
+	// poll performs one bucket scan and, if a new asset is present,
+	// applies it. It mutates lastKey on success and updates lastPoll.
+	poll := func() {
+		latest, allKeys, lerr := findLatest(ctx, svc, bucket)
+		switch {
+		case lerr != nil:
+			if lastPoll != pollListFailed {
+				log.WarnContext(ctx, "poll: failed to list deploy assets",
+					slog.String("bucket", bucket),
+					slog.String("prefix", lightsail.DeployPrefix),
+					slog.Any("err", lerr))
+				lastPoll = pollListFailed
+			} else {
+				trace.Trace(ctx, "poll: list still failing",
+					slog.Any("err", lerr))
+			}
+			return
+		case latest == "":
+			if lastPoll != pollBucketEmpty {
+				log.InfoContext(ctx, "poll: bucket has no deploy assets yet — waiting for first deploy",
+					slog.String("bucket", bucket),
+					slog.String("prefix", lightsail.DeployPrefix))
+				lastPoll = pollBucketEmpty
+			} else {
+				trace.Trace(ctx, "poll: bucket still empty")
+			}
+			return
+		case latest == lastKey:
+			if lastPoll != pollNoChange {
+				log.InfoContext(ctx, "poll: no new deploy assets (latest already applied)",
+					slog.String("latest_key", latest),
+					slog.Int("total_assets", len(allKeys)))
+				lastPoll = pollNoChange
+			} else {
+				trace.Trace(ctx, "poll: no change",
+					slog.String("latest_key", latest))
+			}
+			return
+		}
+
+		log.InfoContext(ctx, "new deployment asset found",
+			slog.String("key", latest),
+			slog.String("previous", lastKey),
+			slog.Int("total_assets", len(allKeys)))
+		start := time.Now()
+		if derr := pullAndApply(ctx, log, svc, bucket, latest, baseDir, currentDir); derr != nil {
+			log.ErrorContext(ctx, "deployment failed",
+				slog.String("key", latest),
+				slog.Duration("elapsed", time.Since(start)),
+				slog.Any("err", derr))
+			lastPoll = pollDeployFailed
+			return
+		}
+		log.InfoContext(ctx, "deployment succeeded",
+			slog.String("key", latest),
+			slog.Duration("elapsed", time.Since(start)))
+		lastKey = latest
+		_ = os.WriteFile(stateFile, []byte(latest), 0o644)
+		prune(ctx, svc, bucket, allKeys, opts.KeepPrevious)
+		lastPoll = pollDeployed
+	}
+
+	// pushStatusIfChanged uploads status to S3 on content change or
+	// once a minute as a heartbeat. Runs after every poll so container
+	// state changes (crashes, restarts) propagate even without a new
+	// deploy.
+	pushStatusIfChanged := func() {
+		body := statusJSON(instance, bucket, opts.Region, lastKey, currentDir)
+		if body == lastStatusBody && time.Since(lastStatusAt) <= time.Minute {
+			return
+		}
+		if err := put(ctx, svc, bucket, instance+lightsail.StatusSuffix, []byte(body), "application/json"); err == nil {
+			lastStatusBody = body
+			lastStatusAt = time.Now()
+		} else {
+			log.WarnContext(ctx, "failed to upload status",
+				slog.Any("err", err))
+		}
+	}
+
+	// Do an immediate poll so operators see feedback without waiting a
+	// full tick interval.
+	poll()
+	pushStatusIfChanged()
+
 	for {
 		select {
 		case <-ctx.Done():
+			log.InfoContext(ctx, "watcher shutting down")
 			return nil
 		case <-ticker.C:
 		}
-
-		latest, allKeys, lerr := findLatest(ctx, svc, bucket)
-		if lerr != nil {
-			log.Printf("list deploys: %v", lerr)
-			continue
-		}
-		if latest != "" && latest != lastKey {
-			log.Printf("new deploy: %s", latest)
-			if derr := pullAndApply(ctx, svc, bucket, latest, baseDir, currentDir); derr != nil {
-				log.Printf("apply %s: %v", latest, derr)
-			} else {
-				lastKey = latest
-				_ = os.WriteFile(stateFile, []byte(latest), 0o644)
-				prune(ctx, svc, bucket, allKeys, opts.KeepPrevious)
-			}
-		}
-
-		// Status: publish on change or every minute.
-		body := statusJSON(instance, bucket, opts.Region, lastKey, currentDir)
-		if body != lastStatusBody || time.Since(lastStatusAt) > time.Minute {
-			if err := put(ctx, svc, bucket, instance+lightsail.StatusSuffix, []byte(body), "application/json"); err == nil {
-				lastStatusBody = body
-				lastStatusAt = time.Now()
-			}
-		}
+		poll()
+		pushStatusIfChanged()
 	}
 }
+
+// pollOutcome tracks the result of the most recent poll. Used to log
+// transitions at Info level while demoting repeats to Trace, so a
+// steady-state "empty bucket" watcher doesn't flood the log.
+type pollOutcome int
+
+const (
+	pollStartup pollOutcome = iota
+	pollBucketEmpty
+	pollNoChange
+	pollListFailed
+	pollDeployed
+	pollDeployFailed
+)
 
 // readBucket returns the bucket name written to /opt/lightsail/<app>/<env>/.bucket
 // by `app local install`.
@@ -154,67 +266,134 @@ func findLatest(ctx context.Context, svc *s3.Client, bucket string) (latest stri
 	return keys[0], keys, nil
 }
 
-func pullAndApply(ctx context.Context, svc *s3.Client, bucket, key, baseDir, currentDir string) error {
+func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket, key, baseDir, currentDir string) error {
+	// Step 1: Download the deploy asset from S3.
+	log.InfoContext(ctx, "downloading deploy asset",
+		slog.String("bucket", bucket), slog.String("key", key))
+	dlStart := time.Now()
 	out, err := svc.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket), Key: aws.String(key),
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("s3 download: %w", err)
 	}
 	defer func() { _ = out.Body.Close() }()
 
 	staging := filepath.Join(baseDir, "staging")
 	_ = os.RemoveAll(staging)
 	if err := os.MkdirAll(staging, 0o755); err != nil {
-		return err
+		return fmt.Errorf("create staging dir: %w", err)
 	}
 	tmp := filepath.Join(baseDir, "deploy.tar.gz")
 	f, err := os.Create(tmp)
 	if err != nil {
-		return err
+		return fmt.Errorf("create temp file: %w", err)
 	}
-	if _, err := io.Copy(f, out.Body); err != nil {
+	n, err := io.Copy(f, out.Body)
+	if err != nil {
 		_ = f.Close()
-		return err
+		return fmt.Errorf("write tarball: %w", err)
 	}
 	_ = f.Close()
 	defer func() { _ = os.Remove(tmp) }()
+	log.InfoContext(ctx, "download complete",
+		slog.Int64("bytes", n),
+		slog.Duration("elapsed", time.Since(dlStart)))
 
-	if err := runCmd(ctx, "", "tar", "xzf", tmp, "-C", staging); err != nil {
+	// Step 2: Extract the tarball.
+	log.InfoContext(ctx, "extracting tarball", slog.String("dest", staging))
+	if err := runCmd(ctx, log, "", "tar", "xzf", tmp, "-C", staging); err != nil {
 		return fmt.Errorf("extract: %w", err)
 	}
-	// Compose down on the old deployment, if any.
-	if cf := findCompose(currentDir); cf != "" {
-		_ = runCmd(ctx, currentDir, "docker", "compose", "-f", cf, "down")
+	// Log what was extracted.
+	if entries, rerr := os.ReadDir(staging); rerr == nil {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		log.InfoContext(ctx, "extracted files",
+			slog.Int("count", len(names)),
+			slog.String("files", strings.Join(names, ", ")))
 	}
+
+	// Step 3: Stop the old deployment.
+	if cf := findCompose(currentDir); cf != "" {
+		log.InfoContext(ctx, "stopping previous deployment",
+			slog.String("compose_file", cf))
+		if err := runCmd(ctx, log, currentDir, "docker", "compose", "-f", cf, "down"); err != nil {
+			log.WarnContext(ctx, "compose down failed (continuing)",
+				slog.Any("err", err))
+		}
+	} else {
+		log.InfoContext(ctx, "no previous deployment to stop")
+	}
+
+	// Step 4: Swap staging → current.
 	_ = os.RemoveAll(currentDir)
 	if err := os.Rename(staging, currentDir); err != nil {
-		return fmt.Errorf("swap: %w", err)
+		return fmt.Errorf("swap staging to current: %w", err)
 	}
+	log.InfoContext(ctx, "swapped staging to current",
+		slog.String("path", currentDir))
+
+	// Step 5: Start the new deployment.
 	cf := findCompose(currentDir)
 	if cf == "" {
-		return fmt.Errorf("no compose file in deployed asset")
+		return fmt.Errorf("no compose file found in deployed asset (looked for docker-compose.yml, compose.yml, etc.)")
 	}
-	return runCmd(ctx, currentDir, "docker", "compose", "-f", cf, "up", "--build", "-d")
+	log.InfoContext(ctx, "starting new deployment",
+		slog.String("compose_file", cf),
+		slog.String("working_dir", currentDir))
+	if err := runCmd(ctx, log, currentDir, "docker", "compose", "-f", cf, "up", "--build", "-d"); err != nil {
+		return fmt.Errorf("compose up: %w", err)
+	}
+	log.InfoContext(ctx, "compose up completed, checking container health")
+
+	// Step 6: Log resulting container states.
+	containers, endpoints := containerInfo(currentDir)
+	for _, c := range containers {
+		log.InfoContext(ctx, "container status",
+			slog.String("name", c.Name),
+			slog.String("image", c.Image),
+			slog.String("status", c.Status))
+	}
+	if len(endpoints) > 0 {
+		log.InfoContext(ctx, "endpoints available",
+			slog.String("endpoints", strings.Join(endpoints, ", ")))
+	}
+	if len(containers) == 0 {
+		log.WarnContext(ctx, "no containers running after compose up")
+	}
+
+	return nil
 }
 
 func prune(ctx context.Context, svc *s3.Client, bucket string, all []string, keep int) {
 	if len(all) <= keep {
 		return
 	}
+	log := trace.FromContext(ctx)
 	var ids []s3types.ObjectIdentifier
 	for _, k := range all[keep:] {
 		k := k
 		ids = append(ids, s3types.ObjectIdentifier{Key: aws.String(k)})
 	}
+	log.InfoContext(ctx, "pruning old deploy assets",
+		slog.Int("removing", len(ids)),
+		slog.Int("keeping", keep))
 	_, _ = svc.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 		Bucket: aws.String(bucket), Delete: &s3types.Delete{Objects: ids},
 	})
 }
 
-func writeStatus(ctx context.Context, svc *s3.Client, bucket, region, instance, lastKey, currentDir string) {
+func writeStatus(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket, region, instance, lastKey, currentDir string) {
 	body := statusJSON(instance, bucket, region, lastKey, currentDir)
-	_ = put(ctx, svc, bucket, instance+lightsail.StatusSuffix, []byte(body), "application/json")
+	if err := put(ctx, svc, bucket, instance+lightsail.StatusSuffix, []byte(body), "application/json"); err != nil {
+		log.WarnContext(ctx, "initial status upload failed",
+			slog.Any("err", err))
+	} else {
+		log.InfoContext(ctx, "initial status uploaded")
+	}
 }
 
 // deployTimeFromKey extracts the unix timestamp from a deploy asset key
@@ -266,6 +445,7 @@ func statusJSON(instance, bucket, region, lastKey, currentDir string) string {
 
 type composePS struct {
 	Name       string `json:"Name"`
+	Service    string `json:"Service"`
 	Image      string `json:"Image"`
 	State      string `json:"State"`
 	CreatedAt  string `json:"CreatedAt"`
@@ -301,18 +481,35 @@ func containerInfo(currentDir string) ([]lightsail.ContainerStatus, []string) {
 		if t, err := time.Parse("2006-01-02 15:04:05 -0700 MST", e.CreatedAt); err == nil {
 			started = t.UTC()
 		}
-		containers = append(containers, lightsail.ContainerStatus{
-			Name: e.Name, Image: e.Image, Status: e.State, StartedAt: started,
-		})
-		if publicIP == "" {
-			continue
-		}
+
+		// Per-container endpoints: walk Publishers, dedupe by port,
+		// format http URL. Keep a union in endpoints (top-level) for
+		// callers that just want a flat list.
+		var cEndpoints []string
+		cSeen := map[int]bool{}
 		for _, p := range e.Publishers {
-			if p.PublishedPort > 0 && !seen[p.PublishedPort] {
-				seen[p.PublishedPort] = true
-				endpoints = append(endpoints, fmt.Sprintf("http://%s:%d", publicIP, p.PublishedPort))
+			if p.PublishedPort <= 0 || cSeen[p.PublishedPort] {
+				continue
+			}
+			cSeen[p.PublishedPort] = true
+			if publicIP != "" {
+				url := fmt.Sprintf("http://%s:%d", publicIP, p.PublishedPort)
+				cEndpoints = append(cEndpoints, url)
+				if !seen[p.PublishedPort] {
+					seen[p.PublishedPort] = true
+					endpoints = append(endpoints, url)
+				}
 			}
 		}
+
+		containers = append(containers, lightsail.ContainerStatus{
+			Name:      e.Name,
+			Service:   e.Service,
+			Image:     e.Image,
+			Status:    e.State,
+			StartedAt: started,
+			Endpoints: cEndpoints,
+		})
 	}
 	return containers, endpoints
 }
@@ -327,12 +524,32 @@ func findCompose(dir string) string {
 	return ""
 }
 
-func runCmd(ctx context.Context, dir, name string, args ...string) error {
+func runCmd(ctx context.Context, log *slog.Logger, dir, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	var combined bytes.Buffer
+	cmd.Stdout = &combined
+	cmd.Stderr = &combined
+	err := cmd.Run()
+	output := strings.TrimSpace(combined.String())
+	if output != "" {
+		// Log last 50 lines max to avoid flooding.
+		lines := strings.Split(output, "\n")
+		if len(lines) > 50 {
+			lines = lines[len(lines)-50:]
+		}
+		level := slog.LevelInfo
+		if err != nil {
+			level = slog.LevelError
+		}
+		log.Log(ctx, level, "exec: "+name,
+			slog.String("args", strings.Join(args, " ")),
+			slog.String("output", strings.Join(lines, "\n")))
+	}
+	if err != nil {
+		return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+	return nil
 }
 
 func put(ctx context.Context, svc *s3.Client, bucket, key string, body []byte, ct string) error {
@@ -389,4 +606,40 @@ func imdsGet(path string) string {
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	return strings.TrimSpace(string(data))
+}
+
+// LocalStatus generates a fresh status snapshot for an app/env without
+// uploading to S3. Used by `app local status` to print current state.
+func LocalStatus(instance, bucket, lastKey, currentDir string) lightsail.Status {
+	st := lightsail.Status{
+		Instance:  instance,
+		Timestamp: time.Now().UTC(),
+		Status:    "idle",
+	}
+	if lastKey != "" {
+		st.LastDeploy = &lightsail.DeployInfo{
+			Timestamp: deployTimeFromKey(lastKey),
+		}
+		if bucket != "" {
+			st.LastDeploy.ObjectURL = fmt.Sprintf("s3://%s/%s", bucket, lastKey)
+		}
+	}
+	st.Containers, st.Endpoints = containerInfo(currentDir)
+	running, total := 0, len(st.Containers)
+	for _, c := range st.Containers {
+		if c.Status == "running" {
+			running++
+		}
+	}
+	switch {
+	case total == 0:
+		st.Status = "idle"
+	case running == total:
+		st.Status = "healthy"
+	case running == 0:
+		st.Status = "down"
+	default:
+		st.Status = "degraded"
+	}
+	return st
 }

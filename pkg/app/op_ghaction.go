@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/ui/theme"
 
 	"github.com/aws/lightsailctl/pkg/config"
 	"github.com/aws/lightsailctl/pkg/ghaction"
@@ -690,12 +691,17 @@ func confirmIAMCreateStep(s *store) func(context.Context, *registry.State) error
 		perm, _ := st.Data["iam.perm"].(string)
 
 		var b strings.Builder
-		fmt.Fprintf(&b, "The following IAM role will be created in AWS account %s:\n\n", acct)
-		fmt.Fprintf(&b, "  Role name   %s\n", roleName)
-		fmt.Fprintf(&b, "  Role ARN    arn:aws:iam::%s:role/%s\n\n", acct, roleName)
-		b.WriteString("Trust policy (who can assume the role):\n")
+		fmt.Fprintf(&b, "%s\n\n", theme.MutedText.Render(
+			fmt.Sprintf("The following IAM role will be created in AWS account %s:", acct)))
+		fmt.Fprintf(&b, "  %s   %s\n", theme.MutedText.Render("Role name"), roleName)
+		fmt.Fprintf(&b, "  %s    %s\n\n", theme.MutedText.Render("Role ARN"),
+			fmt.Sprintf("arn:aws:iam::%s:role/%s", acct, roleName))
+		b.WriteString(theme.MutedText.Render("Trust policy (who can assume the role):"))
+		b.WriteString("\n")
 		b.WriteString(indent(trust, "  "))
-		b.WriteString("\n\nPermissions policy (what the role can do):\n")
+		b.WriteString("\n\n")
+		b.WriteString(theme.MutedText.Render("Permissions policy (what the role can do):"))
+		b.WriteString("\n")
 		b.WriteString(indent(perm, "  "))
 		b.WriteString("\n")
 

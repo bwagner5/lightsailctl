@@ -9,6 +9,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/lightsail"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/bwagner5/triad/pkg/trace"
+
+	"github.com/aws/lightsailctl/internal/logging"
 )
 
 // Client is the domain wrapper around a *lightsail.Client. All Application
@@ -74,6 +77,16 @@ func NewWithOptions(ctx context.Context, opts Options) (*Client, error) {
 		// gives plenty of headroom without hanging forever.
 		config.WithRetryMode(aws.RetryModeAdaptive),
 		config.WithRetryMaxAttempts(10),
+		// Route smithy-go's own logs into our slog pipeline so SDK
+		// retry traces appear alongside the application's
+		// structured events under --debug.
+		config.WithLogger(logging.AWSLogger(trace.FromContext(ctx))),
+		// Only retry diagnostics — never request/response bodies or
+		// signing traces. Authorization headers in LogRequest output
+		// would survive the handler-chain key redactor (smithy emits
+		// format-string lines, not structured attrs). Retry logs
+		// alone cover ~90% of real debugging needs.
+		config.WithClientLogMode(aws.LogRetries),
 	}
 	if opts.Region != "" {
 		awsOpts = append(awsOpts, config.WithRegion(opts.Region))

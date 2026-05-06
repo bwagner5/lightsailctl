@@ -1,6 +1,7 @@
 package lightsail
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -161,10 +162,10 @@ func (c *Client) ForgetOptimistic(name string) {
 // state, so a 'I just started creating' announcement makes the app
 // visible in listing views before any real AWS create returns. Callers
 // that also finish CreateBucket will upgrade the entry to OK state.
-func (c *Client) AnnounceBucket(name, region string) {
+func (c *Client) AnnounceBucket(ctx context.Context, name, region string) {
 	if c.optimistic == nil || name == "" {
 		return
 	}
-	trace.Log("lightsail.AnnounceBucket", "name", name, "region", region, "path", c.optimistic.path)
+	trace.Trace(ctx, "lightsail announce bucket", "name", name, "region", region, "path", c.optimistic.path)
 	c.optimistic.addBucket(Bucket{Name: name, State: "PENDING", Region: region}, 10*time.Minute)
 }

@@ -30,10 +30,19 @@ type DeployInfo struct {
 
 // ContainerStatus describes one running container inside the compose stack.
 type ContainerStatus struct {
-	Name      string    `json:"name"`
+	Name string `json:"name"`
+	// Service is the docker compose service name (e.g. "web" in a
+	// services.web: block). Name is the concrete container (e.g.
+	// "current-web-1"); Service is what the user wrote in compose.yml.
+	Service   string    `json:"service,omitempty"`
 	Image     string    `json:"image"`
 	Status    string    `json:"status"`
 	StartedAt time.Time `json:"started_at"`
+	// Endpoints are the published http URLs that resolve to this
+	// container's exposed ports. Status.Endpoints is the union across
+	// all containers; this field lets consumers attribute an endpoint
+	// back to the service that serves it.
+	Endpoints []string `json:"endpoints,omitempty"`
 }
 
 // ReadBucketStatuses lists every *_status.json object in a bucket and parses

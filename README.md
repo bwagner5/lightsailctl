@@ -90,6 +90,27 @@ ignore:          # paths excluded from the deploy tarball (additive to
 
 Discovery: `Find()` walks up from the current directory, just like git.
 
+## Logging
+
+`lightsailctl` writes structured, text-formatted logs at `INFO` by default.
+Attach one to a bug report and a reviewer can reconstruct the run.
+
+| Flag | Env | Default | Purpose |
+|---|---|---|---|
+| `--debug` | `LIGHTSAILCTL_DEBUG` | off | flip the threshold from `INFO` to `TRACE` (includes SDK retries) |
+| `--log-dest` | `LIGHTSAILCTL_LOG_DEST` | `file` | sink: `file`, `stderr`, or `none` |
+| `--log-file` | `LIGHTSAILCTL_LOG_FILE` | _auto_ | override path when `--log-dest=file` (no retention on user-supplied paths) |
+
+Default log location: `$HOME/.lightsailctl/logs/<UTC-ts>-<pid>.log`. The
+file is created lazily on the first record, and the directory is pruned
+at startup (files older than 14 days or beyond the 100-most-recent are
+deleted). Every log line includes `ui=cli|interactive|tui|watch`, the
+cobra command path, and the saga/step context emitted by the runtime.
+
+The on-instance watcher (installed by `app create`) runs under systemd
+with `--log-dest=stderr`; `journalctl -u lightsailctl-<app>-<env>` is the
+support artifact.
+
 ## Installing
 
 ### Homebrew 🍻

@@ -107,14 +107,14 @@ func TestPendingInstanceFromInput_EmptyReturnsNil(t *testing.T) {
 // round-trip cleanly.
 func TestPendingInstanceFromInput_PopulatesDraft(t *testing.T) {
 	in := registry.Input{
-		"__ni/name":             "silent-cosmos",
-		"__ni/region":           "us-east-2",
-		"__ni/blueprint-type":   "os",
-		"__ni/blueprint":        "amazon_linux_2023",
-		"__ni/bundle":           "large_3_0",
-		"__ni/ip-address-type":  "dualstack",
-		"__ni/user-data":        "/tmp/userdata.sh",
-		"__ni/monitoring":       "true",
+		"__ni/name":            "silent-cosmos",
+		"__ni/region":          "us-east-2",
+		"__ni/blueprint-type":  "os",
+		"__ni/blueprint":       "amazon_linux_2023",
+		"__ni/bundle":          "large_3_0",
+		"__ni/ip-address-type": "dualstack",
+		"__ni/user-data":       "/tmp/userdata.sh",
+		"__ni/monitoring":      "true",
 	}
 	got := pendingInstanceFromInput(in)
 	if got == nil {
@@ -137,12 +137,12 @@ func TestSaveConfigStep_WritesPendingInstanceOnAbort(t *testing.T) {
 
 	st := &registry.State{
 		Input: registry.Input{
-			"name":            "hello",
-			"env":             "dev",
-			"__ni/name":       "silent-cosmos",
-			"__ni/region":     "us-east-2",
-			"__ni/blueprint":  "amazon_linux_2023",
-			"__ni/bundle":     "large_3_0",
+			"name":           "hello",
+			"env":            "dev",
+			"__ni/name":      "silent-cosmos",
+			"__ni/region":    "us-east-2",
+			"__ni/blueprint": "amazon_linux_2023",
+			"__ni/bundle":    "large_3_0",
 		},
 		Data: map[string]any{
 			"strategy": "create-new",

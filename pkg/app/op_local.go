@@ -1,12 +1,19 @@
 package app
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
+	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
 
 	"github.com/aws/lightsailctl/pkg/lightsail"
@@ -23,7 +30,7 @@ func LocalCommand() *cobra.Command {
 		Use:   "local",
 		Short: "[instance] commands invoked over SSH by the client",
 	}
-	root.AddCommand(localInstallCmd(), localUpCmd(), localDownCmd(), localWatchCmd(), localLogsCmd())
+	root.AddCommand(localInstallCmd(), localUpCmd(), localDownCmd(), localWatchCmd(), localLogsCmd(), localLsCmd(), localStatusCmd())
 	return root
 }
 
@@ -106,18 +113,21 @@ func localWatchCmd() *cobra.Command {
 }
 
 func localLogsCmd() *cobra.Command {
-	var app, env string
+	var app, env, service string
 	var follow bool
+	var lines int
 	c := &cobra.Command{
 		Use:   "logs",
 		Short: "tail docker compose logs",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return localLogs(app, env, follow)
+			return localLogs(app, env, follow, lines, service)
 		},
 	}
 	c.Flags().StringVar(&app, "app", "", "application name")
 	c.Flags().StringVar(&env, "env", "", "environment")
-	c.Flags().BoolVarP(&follow, "follow", "f", true, "follow")
+	c.Flags().BoolVarP(&follow, "follow", "f", true, "follow log output")
+	c.Flags().IntVar(&lines, "lines", 200, "number of lines to show from the end")
+	c.Flags().StringVarP(&service, "service", "s", "", "show logs for a specific service only")
 	_ = c.MarkFlagRequired("app")
 	_ = c.MarkFlagRequired("env")
 	return c
@@ -134,10 +144,17 @@ func localInstall(app, env, bucket, region, instance string) error {
 	if err := os.WriteFile(filepath.Join(base, ".bucket"), []byte(bucket), 0o644); err != nil {
 		return err
 	}
+	if region != "" {
+		_ = os.WriteFile(filepath.Join(base, ".region"), []byte(region), 0o644)
+	}
 	if instance != "" {
 		_ = os.WriteFile(filepath.Join(base, ".instance"), []byte(instance), 0o644)
 	}
 	unit := fmt.Sprintf(lightsail.UnitNameFmt, app, env)
+	// The --log-dest=stderr argument routes structured records into
+	// journald (via StandardOutput/Error=journal) so operators can run
+	// `journalctl -u lightsailctl-<app>-<env>` to review watcher
+	// behavior. No on-disk log file is kept on the instance.
 	unitBody := fmt.Sprintf(`[Unit]
 Description=Lightsail deployment watcher for %s/%s
 After=network.target docker.service
@@ -145,7 +162,9 @@ Wants=docker.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/lightsailctl app local watch --app %s --env %s --region %s
+StandardOutput=journal
+StandardError=journal
+ExecStart=/usr/local/bin/lightsailctl --log-dest=stderr app local watch --app %s --env %s --region %s
 Restart=always
 RestartSec=10
 
@@ -171,6 +190,11 @@ func localDown(app, env string) error {
 		c.Stderr = os.Stderr
 		_ = c.Run()
 	}
+
+	// Best-effort: delete the status file from the bucket so the TUI
+	// doesn't keep reporting the instance as healthy after shutdown.
+	deleteBucketStatus(base)
+
 	if err := os.RemoveAll(base); err != nil {
 		return err
 	}
@@ -181,15 +205,52 @@ func localDown(app, env string) error {
 	return nil
 }
 
-func localLogs(app, env string, follow bool) error {
+// deleteBucketStatus removes the <instance>_status.json object from the env
+// bucket. Runs best-effort using IMDS credentials; failures are silently
+// ignored since the local teardown must still proceed.
+func deleteBucketStatus(baseDir string) {
+	bucket, _ := os.ReadFile(filepath.Join(baseDir, ".bucket"))
+	instance, _ := os.ReadFile(filepath.Join(baseDir, ".instance"))
+	region, _ := os.ReadFile(filepath.Join(baseDir, ".region"))
+	b := strings.TrimSpace(string(bucket))
+	inst := strings.TrimSpace(string(instance))
+	reg := strings.TrimSpace(string(region))
+	if b == "" || inst == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	opts := []func(*config.LoadOptions) error{}
+	if reg != "" {
+		opts = append(opts, config.WithRegion(reg))
+	}
+	cfg, err := config.LoadDefaultConfig(ctx, opts...)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not delete bucket status: %v\n", err)
+		return
+	}
+	svc := s3.NewFromConfig(cfg)
+	key := inst + lightsail.StatusSuffix
+	if _, err := svc.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(b),
+		Key:    aws.String(key),
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not delete bucket status %s/%s: %v\n", b, key, err)
+	}
+}
+
+func localLogs(app, env string, follow bool, lines int, service string) error {
 	current := filepath.Join(lightsail.BaseDir, app, env, "current")
 	cf := findCompose(current)
 	if cf == "" {
 		return fmt.Errorf("no compose file at %s (is the app deployed?)", current)
 	}
-	args := []string{"compose", "-f", cf, "logs", "--tail", "200"}
+	args := []string{"compose", "-f", cf, "logs", "--tail", fmt.Sprintf("%d", lines)}
 	if follow {
 		args = append(args, "-f")
+	}
+	if service != "" {
+		args = append(args, service)
 	}
 	cmd := exec.Command("docker", args...)
 	cmd.Dir = current
@@ -217,4 +278,222 @@ func findCompose(dir string) string {
 		}
 	}
 	return ""
+}
+
+// --- ls command ---
+
+func localLsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "ls",
+		Short: "list all apps/envs on this instance",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return localLs()
+		},
+	}
+}
+
+func localLs() error {
+	entries, err := os.ReadDir(lightsail.BaseDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("No apps found.")
+			return nil
+		}
+		return err
+	}
+
+	type row struct {
+		app, env, watcher, status, lastDeploy, containers string
+	}
+	var rows []row
+
+	for _, appEntry := range entries {
+		if !appEntry.IsDir() {
+			continue
+		}
+		appName := appEntry.Name()
+		envEntries, err := os.ReadDir(filepath.Join(lightsail.BaseDir, appName))
+		if err != nil {
+			continue
+		}
+		for _, envEntry := range envEntries {
+			if !envEntry.IsDir() {
+				continue
+			}
+			envName := envEntry.Name()
+			baseDir := filepath.Join(lightsail.BaseDir, appName, envName)
+			currentDir := filepath.Join(baseDir, "current")
+			unit := fmt.Sprintf(lightsail.UnitNameFmt, appName, envName)
+
+			// Read markers best-effort; localLs is a read-only status view.
+			lastKey := ""
+			if b, rerr := os.ReadFile(filepath.Join(baseDir, ".last-deploy")); rerr == nil {
+				lastKey = strings.TrimSpace(string(b))
+			}
+			bucket := ""
+			if b, rerr := os.ReadFile(filepath.Join(baseDir, ".bucket")); rerr == nil {
+				bucket = strings.TrimSpace(string(b))
+			}
+			instance := ""
+			if b, rerr := os.ReadFile(filepath.Join(baseDir, ".instance")); rerr == nil {
+				instance = strings.TrimSpace(string(b))
+			}
+			st := watch.LocalStatus(instance, bucket, lastKey, currentDir)
+
+			rows = append(rows, row{
+				app:        appName,
+				env:        envName,
+				watcher:    systemctlState(unit),
+				status:     st.Status,
+				lastDeploy: formatLastDeploy(st.LastDeploy),
+				containers: composeContainerSummary(currentDir),
+			})
+		}
+	}
+
+	if len(rows) == 0 {
+		fmt.Println("No apps found.")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	// Column meanings:
+	//   WATCHER     systemd ActiveState of the lightsail-watch-<app>-<env> unit.
+	//   STATUS      application-level status computed from docker ps output.
+	//               idle = no containers; healthy/degraded/down = deploy active.
+	//   LAST DEPLOY timestamp of the last applied deploy tarball, or "never".
+	//   CONTAINERS  docker compose ps summary, or "-" when nothing is deployed.
+	fmt.Fprintf(tw, "APP\tENV\tWATCHER\tSTATUS\tLAST DEPLOY\tCONTAINERS\n")
+	for _, r := range rows {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.app, r.env, r.watcher, r.status, r.lastDeploy, r.containers)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	// Footer: give operators the commands they'll almost always want
+	// next. The unit name is mechanical, but printing it saves a tab-
+	// complete dance.
+	fmt.Fprintln(os.Stdout)
+	fmt.Fprintln(os.Stdout, "Tail watcher logs:  journalctl -u lightsail-watch-<app>-<env> -f")
+	fmt.Fprintln(os.Stdout, "App logs:           lightsailctl app local logs --app <app> --env <env>")
+	return nil
+}
+
+// formatLastDeploy returns a short, human-readable last-deploy column
+// value. Empty DeployInfo → "never" so the absence of any deploy is
+// obvious at a glance.
+func formatLastDeploy(d *lightsail.DeployInfo) string {
+	if d == nil || d.Timestamp.IsZero() {
+		return "never"
+	}
+	age := time.Since(d.Timestamp)
+	switch {
+	case age < time.Minute:
+		return "just now"
+	case age < time.Hour:
+		return fmt.Sprintf("%dm ago", int(age.Minutes()))
+	case age < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(age.Hours()))
+	default:
+		return d.Timestamp.UTC().Format("2006-01-02 15:04")
+	}
+}
+
+// systemctlState returns the ActiveState of a systemd unit (active, inactive, failed, etc).
+func systemctlState(unit string) string {
+	out, err := exec.Command("systemctl", "show", "--property=ActiveState", "--value", unit+".service").Output()
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// composeContainerSummary returns a short summary of running containers like "web(running),db(running)".
+func composeContainerSummary(currentDir string) string {
+	cf := findCompose(currentDir)
+	if cf == "" {
+		return "-"
+	}
+	cmd := exec.Command("docker", "compose", "-f", cf, "ps", "--format", "json")
+	cmd.Dir = currentDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "-"
+	}
+	type cps struct {
+		Service string `json:"Service"`
+		State   string `json:"State"`
+	}
+	var parts []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		var c cps
+		if json.Unmarshal([]byte(line), &c) != nil {
+			continue
+		}
+		parts = append(parts, c.Service+"("+c.State+")")
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ",")
+}
+
+// --- status command ---
+
+func localStatusCmd() *cobra.Command {
+	var app, env string
+	c := &cobra.Command{
+		Use:   "status",
+		Short: "print the current status for an app/env",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return localStatus(app, env)
+		},
+	}
+	c.Flags().StringVar(&app, "app", "", "application name")
+	c.Flags().StringVar(&env, "env", "", "environment")
+	_ = c.MarkFlagRequired("app")
+	_ = c.MarkFlagRequired("env")
+	return c
+}
+
+func localStatus(app, env string) error {
+	baseDir := filepath.Join(lightsail.BaseDir, app, env)
+	if _, err := os.Stat(baseDir); err != nil {
+		return fmt.Errorf("app %s/%s not found on this instance", app, env)
+	}
+	currentDir := filepath.Join(baseDir, "current")
+
+	// Read instance name from .instance marker or fall back to hostname.
+	instance := ""
+	if b, err := os.ReadFile(filepath.Join(baseDir, ".instance")); err == nil {
+		instance = strings.TrimSpace(string(b))
+	}
+	if instance == "" {
+		instance, _ = os.Hostname()
+	}
+
+	// Read bucket and region from markers (best-effort for the status shape).
+	bucket := ""
+	if b, err := os.ReadFile(filepath.Join(baseDir, ".bucket")); err == nil {
+		bucket = strings.TrimSpace(string(b))
+	}
+
+	// Read last deploy key.
+	lastKey := ""
+	if b, err := os.ReadFile(filepath.Join(baseDir, ".last-deploy")); err == nil {
+		lastKey = strings.TrimSpace(string(b))
+	}
+
+	// Regenerate status using the same logic as the watcher.
+	st := watch.LocalStatus(instance, bucket, lastKey, currentDir)
+	data, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(data))
+	return nil
 }

@@ -71,7 +71,7 @@ func (c *Client) ListBuckets(ctx context.Context) ([]Bucket, error) {
 			}
 		}
 	}
-	trace.Log("lightsail.ListBuckets.regional", "region", c.cfg.Region, "count", len(buckets), "names", bucketNames(buckets))
+	trace.Trace(ctx, "lightsail list buckets regional", "region", c.cfg.Region, "count", len(buckets), "names", bucketNames(buckets))
 	return buckets, nil
 }
 

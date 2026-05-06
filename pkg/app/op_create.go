@@ -67,7 +67,7 @@ func createOp(s *store) registry.Operation {
 					"pick an existing instance",
 					"create a new instance")},
 			{Flag: "instance", Label: "Lightsail instance",
-				Help: "target Lightsail instance",
+				Help:     "target Lightsail instance",
 				Required: true, When: wantsExisting,
 				Suggest: instanceSuggest(s)},
 

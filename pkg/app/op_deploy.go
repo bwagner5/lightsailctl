@@ -17,6 +17,7 @@ import (
 	"github.com/aws/lightsailctl/pkg/compose"
 	"github.com/aws/lightsailctl/pkg/config"
 	"github.com/aws/lightsailctl/pkg/deploy"
+	"github.com/aws/lightsailctl/pkg/ghaction"
 	"github.com/aws/lightsailctl/pkg/instance"
 	"github.com/aws/lightsailctl/pkg/lightsail"
 	"github.com/aws/lightsailctl/pkg/names"
@@ -145,6 +146,19 @@ func deployOp(s *store) registry.Operation {
 				File:    true,
 				When:    needsAgentBinaryPrompt},
 
+			// ── GitHub Actions ───────────────────────────────────
+			// Shown only on first-time deploys of GitHub-hosted repos.
+			{Flag: "offer-gh-action", Label: "GitHub Actions CI",
+				Help:    "set up a GitHub Actions workflow so pushes auto-deploy",
+				Section: "GitHub Actions",
+				Kind:    registry.KindBool,
+				Default: "true",
+				When:    func(in registry.Input) bool { return in.Get("__first-deploy-with-gh") == "true" },
+				Suggest: yesNoSuggest(
+					"I'll do this later",
+					"set up auto-deploy workflow"),
+			},
+
 			// ── Review & Confirm ─────────────────────────────────
 			{Flag: "deploy-confirm", Label: "Proceed",
 				Help:     "confirm before any changes land",
@@ -201,6 +215,33 @@ func deployOp(s *store) registry.Operation {
 			{Label: "Copy agent binary to instance", Do: scpAgentStep(s), Skip: skipIfAbortedOrAppExists},
 			{Label: "Install agent on instance", Do: remoteInstallStep(s), Skip: skipIfAbortedOrAppExists},
 			{Label: "Start agent on instance", Do: remoteUpStep(s), Skip: skipIfAbortedOrAppExists},
+			// ── GitHub Actions CI setup (first-run only) ─────────
+			// Runs after supporting infra is ready but before the
+			// actual deploy. If something fails in deploy, all
+			// supporting infra (including IAM/workflow) is already
+			// set up for the next attempt.
+			{Label: "Offer GitHub Actions deploy workflow",
+				Do:   offerGhActionChoiceStep,
+				Skip: skipOfferGhActionWithAbort(s)},
+			{Label: "Detect GitHub remote", Do: detectRemoteStep,
+				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
+			{Label: "Resolve GitHub token", Do: resolveGhTokenStep,
+				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
+			{Label: "Fetch repo metadata", Do: fetchRepoStep,
+				Skip: skipCIOrAborted(skipCIFetchRepo)},
+			{Label: "Build IAM policies", Do: buildPoliciesStep(s),
+				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
+			{Label: "Confirm IAM role creation", Do: confirmIAMCreateStep(s),
+				Skip: skipCIOrAborted(skipCIConfirmIAM(s))},
+			{Label: "Ensure OIDC provider", Do: ensureProviderStep(s),
+				Skip: skipCIOrAborted(skipCIProvisionIAM)},
+			{Label: "Create IAM role", Do: ensureRoleStep(s),
+				Skip: skipCIOrAborted(skipCIProvisionIAM)},
+			{Label: "Write workflow file", Do: writeWorkflowStep,
+				Skip: skipCIOrAborted(skipCIWriteWorkflow)},
+			{Label: "GitHub Actions setup complete", Do: enableSummaryStep,
+				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
+			// ── Actual deploy (last) ─────────────────────────────
 			{Label: "Package source", Do: packageStep, Skip: skipIfAborted, Undo: packageUndo},
 			{Label: "Acquire bucket key", Do: acquireKeyStep(s), Skip: skipIfAborted, Undo: acquireKeyUndo},
 			{Label: "Upload deploy asset", Do: uploadStep, Skip: skipIfAborted},
@@ -209,7 +250,6 @@ func deployOp(s *store) registry.Operation {
 			{Label: "Wait for healthy", Do: func(ctx context.Context, st *registry.State) error {
 				return waitStep(s)(ctx, st)
 			}, Skip: skipIfAbortedOrNoWait},
-			// If no-wait, still restore global view.
 			{Label: "Finalize", Do: func(ctx context.Context, st *registry.State) error {
 				// Collect endpoints BEFORE unpinning the region — the
 				// region-pinned client is needed for S3ClientFor.
@@ -235,35 +275,6 @@ func deployOp(s *store) registry.Operation {
 				_ = unpinStoreStep(s)(ctx, st)
 				return nil
 			}, Skip: skipIfAborted},
-			// ── GitHub Actions CI setup (first-run only) ─────────
-			// Gate: a single yes/no step that runs on a first-run
-			// deploy (conf didn't pre-exist) of a GitHub-hosted repo,
-			// and only in interactive mode. All subsequent CI steps
-			// Skip unless the user opted in here, so the progress
-			// view shows the individual IAM / workflow work in the
-			// saga step list rather than hiding it inside one opaque
-			// "Offer GitHub Actions" row.
-			{Label: "Offer GitHub Actions deploy workflow",
-				Do:   offerGhActionChoiceStep,
-				Skip: skipOfferGhActionWithAbort(s)},
-			{Label: "Detect GitHub remote", Do: detectRemoteStep,
-				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
-			{Label: "Resolve GitHub token", Do: resolveGhTokenStep,
-				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
-			{Label: "Fetch repo metadata", Do: fetchRepoStep,
-				Skip: skipCIOrAborted(skipCIFetchRepo)},
-			{Label: "Build IAM policies", Do: buildPoliciesStep(s),
-				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
-			{Label: "Confirm IAM role creation", Do: confirmIAMCreateStep(s),
-				Skip: skipCIOrAborted(skipCIConfirmIAM(s))},
-			{Label: "Ensure OIDC provider", Do: ensureProviderStep(s),
-				Skip: skipCIOrAborted(skipCIProvisionIAM)},
-			{Label: "Create IAM role", Do: ensureRoleStep(s),
-				Skip: skipCIOrAborted(skipCIProvisionIAM)},
-			{Label: "Write workflow file", Do: writeWorkflowStep,
-				Skip: skipCIOrAborted(skipCIWriteWorkflow)},
-			{Label: "GitHub Actions setup complete", Do: enableSummaryStep,
-				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
 		},
 	}
 }
@@ -337,7 +348,32 @@ func deployPre(ctx context.Context, in registry.Input) error {
 		return err
 	}
 	preresolveAgentBinary(ctx, in)
+	// Mark whether this is a first-time deploy of a GitHub-hosted repo
+	// so the wizard can show the GH Actions offer field up front.
+	predetectGhOffer(in)
 	return nil
+}
+
+// predetectGhOffer sets __first-deploy-with-gh=true in Input when this
+// is a first-time deploy (no lightsail.conf) of a GitHub-hosted repo.
+// The wizard's offer-gh-action field uses this as its When predicate.
+func predetectGhOffer(in registry.Input) {
+	cfg, _ := config.LoadFromCwd()
+	if cfg != nil {
+		return // conf exists → not a first-time deploy
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	raw, _ := ghaction.DetectRemoteURL(cwd)
+	if raw == "" {
+		return
+	}
+	if _, perr := ghaction.ParseRemoteURL(raw); perr != nil {
+		return
+	}
+	in["__first-deploy-with-gh"] = "true"
 }
 
 // preresolveAgentBinary best-effort fills Input["agent-path"] from
@@ -587,7 +623,7 @@ func ensureAppStep(s *store) func(context.Context, *registry.State) error {
 		// Re-announce now that we know the region, so the TUI's
 		// regional ListBuckets merge (which strictly matches region)
 		// picks up the entry.
-		c.AnnounceBucket(envBucket, region)
+		c.AnnounceBucket(ctx, envBucket, region)
 		return nil
 	}
 }
@@ -617,7 +653,7 @@ func announceEarlyStep(s *store) func(context.Context, *registry.State) error {
 		st.Data["acct"] = acct
 		envBucket := lightsail.EnvBucketName(acct, st.Input.Get("name"), st.Input.Get("env"))
 		region := st.Input.Get("region")
-		c.AnnounceBucket(envBucket, region)
+		c.AnnounceBucket(ctx, envBucket, region)
 		return nil
 	}
 }

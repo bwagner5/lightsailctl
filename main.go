@@ -14,16 +14,19 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"regexp"
 
 	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/trace"
 	"github.com/bwagner5/triad/pkg/ui/cli"
 	"github.com/bwagner5/triad/pkg/ui/tui"
 	"github.com/spf13/cobra"
 
 	"github.com/aws/lightsailctl/internal"
+	"github.com/aws/lightsailctl/internal/logging"
 	"github.com/aws/lightsailctl/internal/plugin"
 	"github.com/aws/lightsailctl/pkg/app"
 	"github.com/aws/lightsailctl/pkg/instance"
@@ -57,9 +60,25 @@ func Run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
 	defer stop()
 
+	// shutdown is set by PersistentPreRunE once logging.Init has opened
+	// the sink. The deferred closer below flushes on normal exit and
+	// during panic unwind.
+	var shutdown func() error
+	defer func() {
+		if shutdown != nil {
+			_ = shutdown()
+		}
+	}()
+
 	// Resolve all environment input here.
 	region := getenv(cli.FlagToEnvVar(cliName, "region"))
 	regionHints := dedupeNonEmpty(getenv("AWS_REGION"), getenv("AWS_DEFAULT_REGION"))
+	// lightsailctl-owned logging flags, with env-var fallbacks.
+	logDest := getenv(cli.FlagToEnvVar(cliName, "log-dest"))
+	if logDest == "" {
+		logDest = string(logging.DestFile)
+	}
+	logFile := getenv(cli.FlagToEnvVar(cliName, "log-file"))
 
 	g := &cli.Globals{Getenv: getenv}
 	reg := registry.New()
@@ -76,6 +95,45 @@ func Run(ctx context.Context, args []string, getenv func(string) string, stdout,
 
 	root.PersistentFlags().StringVar(&region, "region", region,
 		"AWS region (blank = query all regions) [$"+cli.FlagToEnvVar(cliName, "region")+"]")
+	root.PersistentFlags().StringVar(&logDest, "log-dest", logDest,
+		"log sink: file (default) | stderr | none [$"+cli.FlagToEnvVar(cliName, "log-dest")+"]")
+	root.PersistentFlags().StringVar(&logFile, "log-file", logFile,
+		"override the default log path (only when --log-dest=file; retention not applied) [$"+cli.FlagToEnvVar(cliName, "log-file")+"]")
+
+	// Wrap PersistentPreRunE so logging is initialized BEFORE triad's
+	// inner pre-run (which flips the LevelVar and stamps ui/cmd
+	// attrs). See logging-plan.md §6.
+	prevPreRun := root.PersistentPreRunE
+	root.PersistentPreRunE = func(cmd *cobra.Command, cmdArgs []string) error {
+		logger, sd, err := logging.Init(logging.Options{
+			Dest:   logging.Dest(logDest),
+			Path:   logFile,
+			UI:     "cli", // triad's inner refines to cli|interactive; tui/watch override at their Run.
+			Stderr: cmd.ErrOrStderr(),
+			Attrs: []slog.Attr{
+				slog.String("cli_version", internal.Version().String()),
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("init logging: %w", err)
+		}
+		shutdown = sd
+		cmd.SetContext(trace.IntoContext(cmd.Context(), logger))
+		if prevPreRun != nil {
+			if err := prevPreRun(cmd, cmdArgs); err != nil {
+				return err
+			}
+		}
+		// Echo the resolved log path under --debug for bug-report
+		// ergonomics. TUI suppresses this itself (stderr corrupts the
+		// alt-screen) by overriding --log-dest only if the user opts in.
+		if logging.Dest(logDest) == logging.DestFile && g.Debug {
+			if p := logging.CurrentPath(); p != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "trace log: %s\n", p)
+			}
+		}
+		return nil
+	}
 
 	// Top-level `lightsailctl deploy` runs `app deploy`.
 	root.AddCommand(cli.AliasOp(reg, g, "app", "deploy", "deploy",
