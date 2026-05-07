@@ -3,6 +3,7 @@ package lightsail
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -37,6 +38,17 @@ type Client struct {
 	// skip the expensive CreateBucketAccessKey round-trip on cache hit.
 	// Shared across WithRegion copies via pointer.
 	keyCache *KeyCache
+	// statuses memoizes FetchBucketStatuses output per bucket for a
+	// short TTL (statusTTL) so the three async TUI loaders that read
+	// the same bucket (Status, Instances, Endpoints) share a single
+	// S3 round-trip per refresh. Shared across WithRegion copies.
+	statuses *statusesCache
+	// baseLog is the slog logger captured at construction time (from the
+	// constructor's ctx). Retained here so WithRegion can build a fresh
+	// region-tagged SDK logger on every copy; otherwise the AWS SDK's
+	// retry / StatusCode log lines come out with no region attribution
+	// and a fan-out of 30 regions looks like one indistinguishable blur.
+	baseLog *slog.Logger
 }
 
 // Options configures Client construction.
@@ -69,6 +81,16 @@ func New(ctx context.Context, region string) (*Client, error) {
 
 // NewWithOptions is the full constructor.
 func NewWithOptions(ctx context.Context, opts Options) (*Client, error) {
+	baseLog := trace.FromContext(ctx)
+	// Scope the SDK logger by the caller-pinned region when we have one
+	// so every retry/debug line from the returned client is traceable
+	// back to its region. The global (unpinned) case stays unattributed
+	// here — WithRegion below adds the region when a regional sub-client
+	// is built.
+	sdkLog := baseLog
+	if opts.Region != "" {
+		sdkLog = baseLog.With(slog.String("region", opts.Region))
+	}
 	awsOpts := []func(*config.LoadOptions) error{
 		// Transient-failure resilience. Default is 3 attempts with a
 		// standard retryer, which is fine for steady-state calls but
@@ -84,7 +106,7 @@ func NewWithOptions(ctx context.Context, opts Options) (*Client, error) {
 		// Route smithy-go's own logs into our slog pipeline so SDK
 		// retry traces appear alongside the application's
 		// structured events under --debug.
-		config.WithLogger(logging.AWSLogger(trace.FromContext(ctx))),
+		config.WithLogger(logging.AWSLogger(sdkLog)),
 		// Only retry diagnostics — never request/response bodies or
 		// signing traces. Authorization headers in LogRequest output
 		// would survive the handler-chain key redactor (smithy emits
@@ -111,6 +133,8 @@ func NewWithOptions(ctx context.Context, opts Options) (*Client, error) {
 		regionHints: opts.RegionHints,
 		optimistic:  sharedOptimisticCache,
 		keyCache:    sharedKeyCache,
+		statuses:    sharedStatusesCache,
+		baseLog:     baseLog,
 	}
 	if cfg.Region != "" {
 		c.ls = lightsail.NewFromConfig(cfg)
@@ -129,11 +153,22 @@ func (c *Client) Region() string { return c.cfg.Region }
 func (c *Client) Config() aws.Config { return c.cfg }
 
 // WithRegion returns a copy of Client pinned to the given region. Safe to
-// call with "" to get a (still-global) copy.
+// call with "" to get a (still-global) copy. The SDK-level logger is
+// re-scoped with a region=<r> attr so every smithy retry / StatusCode
+// line emitted by the returned client carries its region — critical
+// for fan-outs where a 400 on us-iso-east-1 is "region requires opt-in"
+// rather than a real failure.
 func (c *Client) WithRegion(region string) *Client {
 	cfg := c.cfg.Copy()
 	cfg.Region = region
-	out := &Client{cfg: cfg, sts: sts.NewFromConfig(cfg), regionHints: c.regionHints, optimistic: c.optimistic, regions: c.regions, keyCache: c.keyCache}
+	if c.baseLog != nil {
+		log := c.baseLog
+		if region != "" {
+			log = log.With(slog.String("region", region))
+		}
+		cfg.Logger = logging.AWSLogger(log)
+	}
+	out := &Client{cfg: cfg, sts: sts.NewFromConfig(cfg), regionHints: c.regionHints, optimistic: c.optimistic, regions: c.regions, keyCache: c.keyCache, statuses: c.statuses, baseLog: c.baseLog}
 	if region != "" {
 		out.ls = lightsail.NewFromConfig(cfg)
 	}

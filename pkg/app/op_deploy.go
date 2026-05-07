@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bwagner5/triad/pkg/registry"
@@ -876,14 +877,59 @@ func waitStep(s *store) func(context.Context, *registry.State) error {
 		defer cancel()
 		started := st.Data["started"].(time.Time)
 		bucket := st.Data["bucket"].(string)
-		werr := deploy.WaitForHealthy(waitCtx, c, bucket, started, 5*time.Second)
+		asset := st.Data["asset"].(string)
+		werr := deploy.WaitForHealthy(waitCtx, c, bucket, asset, started, 5*time.Second)
 		if errors.Is(werr, context.DeadlineExceeded) {
-			// Don't fail the saga: the deploy was uploaded, the watcher may
-			// just be slow. User sees this as a warning in the saga log.
-			return nil
+			// Don't treat timeout as success — the watcher may still
+			// be bootstrapping (docker install, compose pull, …) or
+			// the new tarball may have failed to apply. Surface the
+			// last-observed state so the user has something to act
+			// on, and let the saga mark the step as failed. Use the
+			// parent ctx for the diagnostic read so we don't re-hit
+			// the exhausted deadline.
+			summary := lastStatusSummary(ctx, c, bucket, asset, started)
+			return fmt.Errorf(
+				"timed out after %s waiting for deploy to reach healthy%s; "+
+					"the watcher may still be bootstrapping — retry, or increase --wait-timeout",
+				timeout, summary)
 		}
 		return werr
 	}
+}
+
+// lastStatusSummary reads the current status.json files in the env bucket
+// and renders a short, human-readable summary for error messages. Returns
+// an empty string when nothing's been reported yet so the parent error
+// sentence reads cleanly.
+//
+// Output shape: " — last observed: box-a=idle (0/0) (pre-deploy), box-b=degraded (1/2)"
+func lastStatusSummary(ctx context.Context, c *lightsail.Client, bucket, asset string, since time.Time) string {
+	statuses, err := c.ReadBucketStatuses(ctx, bucket)
+	if err != nil || len(statuses) == 0 {
+		return " — no watcher reports in bucket yet"
+	}
+	parts := make([]string, 0, len(statuses))
+	for _, s := range statuses {
+		running, total := 0, len(s.Containers)
+		for _, ct := range s.Containers {
+			if ct.Status == "running" {
+				running++
+			}
+		}
+		state := s.Status
+		if state == "" {
+			state = "unknown"
+		}
+		note := ""
+		switch {
+		case s.Timestamp.Before(since):
+			note = " (pre-deploy)"
+		case s.LastDeploy == nil, s.LastDeploy != nil && !strings.HasSuffix(s.LastDeploy.ObjectURL, asset):
+			note = " (old deploy)"
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s (%d/%d)%s", s.Instance, state, running, total, note))
+	}
+	return " — last observed: " + strings.Join(parts, ", ")
 }
 
 func firstNonEmpty(vals ...string) string {

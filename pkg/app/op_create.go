@@ -52,7 +52,13 @@ func createOp(s *store) registry.Operation {
 
 	return registry.Operation{
 		Name: "create", Key: "c", Short: "create a new Lightsail application",
-		Confirm: "Create this Lightsail application?",
+		// Keep the "c" key binding discoverable via the "?" help
+		// overlay and command palette, but omit it from the bottom
+		// status bar. Creating a brand-new app is a rare, top-of-
+		// funnel action; the always-on hint row is better reserved
+		// for the day-to-day verbs (deploy, add-target, logs, …).
+		HideFromStatusBar: true,
+		Confirm:           "Create this Lightsail application?",
 		Fields: []registry.Field{
 			{Flag: "name", Short: "n", Label: "App name", Help: "app name", Prefill: names.DefaultAppName,
 				Required: true, Validate: names.ValidateLabel},
@@ -181,7 +187,10 @@ func instanceSuggest(s *store) func(context.Context) ([]registry.Choice, error) 
 // ── Steps ─────────────────────────────────────────────────────────────
 
 // resolveRegionStep fills --region from the picked instance's actual
-// region so the user never has to pick region separately.
+// region so the user never has to pick region separately. When the
+// Multi-valued instance field carries several names the first one
+// seeds the region (they must all live in the same region to share
+// a regional app/env bucket).
 func resolveRegionStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		if st.Input.Get("region") != "" {
@@ -191,7 +200,14 @@ func resolveRegionStep(s *store) func(context.Context, *registry.State) error {
 		if err != nil {
 			return err
 		}
-		region, err := regionOfInstance(ctx, c, st.Input.Get("instance"))
+		first := ""
+		if inst := st.Input.Multi("instance"); len(inst) > 0 {
+			first = inst[0]
+		}
+		if first == "" {
+			return fmt.Errorf("instance is required")
+		}
+		region, err := regionOfInstance(ctx, c, first)
 		if err != nil {
 			return err
 		}
@@ -242,7 +258,15 @@ func tagInstanceStep(s *store) func(context.Context, *registry.State) error {
 			return err
 		}
 		key := lightsail.TagPrefix + st.Input.Get("name") + ":" + st.Input.Get("env")
-		return c.TagInstance(ctx, st.Input.Get("instance"), key, "true")
+		// Iterate to support the Multi-valued instance field used by
+		// add-target. Single-instance ops (create, deploy) just loop
+		// once since Input.Multi falls back to the scalar value.
+		for _, inst := range st.Input.Multi("instance") {
+			if err := c.TagInstance(ctx, inst, key, "true"); err != nil {
+				return fmt.Errorf("tag %s: %w", inst, err)
+			}
+		}
+		return nil
 	}
 }
 
@@ -263,8 +287,13 @@ func grantAccessStep(s *store) func(context.Context, *registry.State) error {
 		if err != nil {
 			return err
 		}
-		return c.SetBucketAccessForInstance(ctx,
-			st.Data["bucket"].(string), st.Input.Get("instance"), true)
+		bucket := st.Data["bucket"].(string)
+		for _, inst := range st.Input.Multi("instance") {
+			if err := c.SetBucketAccessForInstance(ctx, bucket, inst, true); err != nil {
+				return fmt.Errorf("grant bucket access to %s: %w", inst, err)
+			}
+		}
+		return nil
 	}
 }
 
@@ -278,7 +307,11 @@ func revokeAccessUndo(s *store) func(context.Context, *registry.State) error {
 		if c == nil {
 			return nil
 		}
-		_ = c.SetBucketAccessForInstance(ctx, bucket, st.Input.Get("instance"), false)
+		// Best-effort on every instance we granted access to so undo
+		// leaves no orphan policy entries even on partial failures.
+		for _, inst := range st.Input.Multi("instance") {
+			_ = c.SetBucketAccessForInstance(ctx, bucket, inst, false)
+		}
 		return nil
 	}
 }
@@ -289,22 +322,33 @@ func scpAgentStep(s *store) func(context.Context, *registry.State) error {
 		if err != nil {
 			return err
 		}
-		creds, err := c.GetInstanceSSH(ctx, st.Input.Get("instance"))
-		if err != nil {
-			return err
-		}
-		defer creds.Remove()
-
-		// 1) scp to /tmp, 2) sudo mv into /usr/local/bin, 3) smoke-test --version.
-		if err := creds.SCPTo(ctx, st.Input.Get("agent-path"), "/tmp/lightsailctl", false); err != nil {
-			return err
-		}
-		install := "sudo mv /tmp/lightsailctl /usr/local/bin/lightsailctl && sudo chmod +x /usr/local/bin/lightsailctl && /usr/local/bin/lightsailctl --version"
-		if out, err := creds.SSHRun(ctx, install); err != nil {
-			return fmt.Errorf("install/verify: %s: %w", out, err)
+		for _, inst := range st.Input.Multi("instance") {
+			if err := scpAgentToOne(ctx, c, inst, st.Input.Get("agent-path")); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
+}
+
+// scpAgentToOne uploads the agent to a single instance and smoke-tests it.
+// Factored out of scpAgentStep so the per-instance loop stays readable.
+func scpAgentToOne(ctx context.Context, c *lightsail.Client, instance, agentPath string) error {
+	creds, err := c.GetInstanceSSH(ctx, instance)
+	if err != nil {
+		return fmt.Errorf("ssh creds for %s: %w", instance, err)
+	}
+	defer creds.Remove()
+
+	// 1) scp to /tmp, 2) sudo mv into /usr/local/bin, 3) smoke-test --version.
+	if err := creds.SCPTo(ctx, agentPath, "/tmp/lightsailctl", false); err != nil {
+		return fmt.Errorf("scp to %s: %w", instance, err)
+	}
+	install := "sudo mv /tmp/lightsailctl /usr/local/bin/lightsailctl && sudo chmod +x /usr/local/bin/lightsailctl && /usr/local/bin/lightsailctl --version"
+	if out, err := creds.SSHRun(ctx, install); err != nil {
+		return fmt.Errorf("install/verify on %s: %s: %w", instance, out, err)
+	}
+	return nil
 }
 
 func remoteInstallStep(s *store) func(context.Context, *registry.State) error {
@@ -313,21 +357,30 @@ func remoteInstallStep(s *store) func(context.Context, *registry.State) error {
 		if err != nil {
 			return err
 		}
-		creds, err := c.GetInstanceSSH(ctx, st.Input.Get("instance"))
-		if err != nil {
-			return err
-		}
-		defer creds.Remove()
-		cmd := fmt.Sprintf(
-			"sudo /usr/local/bin/lightsailctl app local install --app %s --env %s --bucket %s --region %s --instance %s",
-			st.Input.Get("name"), st.Input.Get("env"),
-			st.Data["bucket"].(string), st.Input.Get("region"),
-			st.Input.Get("instance"))
-		if out, err := creds.SSHRun(ctx, cmd); err != nil {
-			return fmt.Errorf("remote install: %s: %w", out, err)
+		bucket := st.Data["bucket"].(string)
+		for _, inst := range st.Input.Multi("instance") {
+			if err := remoteInstallOne(ctx, c, inst, bucket,
+				st.Input.Get("name"), st.Input.Get("env"), st.Input.Get("region")); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
+}
+
+func remoteInstallOne(ctx context.Context, c *lightsail.Client, instance, bucket, app, env, region string) error {
+	creds, err := c.GetInstanceSSH(ctx, instance)
+	if err != nil {
+		return fmt.Errorf("ssh creds for %s: %w", instance, err)
+	}
+	defer creds.Remove()
+	cmd := fmt.Sprintf(
+		"sudo /usr/local/bin/lightsailctl app local install --app %s --env %s --bucket %s --region %s --instance %s",
+		app, env, bucket, region, instance)
+	if out, err := creds.SSHRun(ctx, cmd); err != nil {
+		return fmt.Errorf("remote install on %s: %s: %w", instance, out, err)
+	}
+	return nil
 }
 
 func remoteUpStep(s *store) func(context.Context, *registry.State) error {
@@ -336,18 +389,26 @@ func remoteUpStep(s *store) func(context.Context, *registry.State) error {
 		if err != nil {
 			return err
 		}
-		creds, err := c.GetInstanceSSH(ctx, st.Input.Get("instance"))
-		if err != nil {
-			return err
-		}
-		defer creds.Remove()
-		cmd := fmt.Sprintf("sudo /usr/local/bin/lightsailctl app local up --app %s --env %s",
-			st.Input.Get("name"), st.Input.Get("env"))
-		if out, err := creds.SSHRun(ctx, cmd); err != nil {
-			return fmt.Errorf("remote up: %s: %w", out, err)
+		for _, inst := range st.Input.Multi("instance") {
+			if err := remoteUpOne(ctx, c, inst, st.Input.Get("name"), st.Input.Get("env")); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
+}
+
+func remoteUpOne(ctx context.Context, c *lightsail.Client, instance, app, env string) error {
+	creds, err := c.GetInstanceSSH(ctx, instance)
+	if err != nil {
+		return fmt.Errorf("ssh creds for %s: %w", instance, err)
+	}
+	defer creds.Remove()
+	cmd := fmt.Sprintf("sudo /usr/local/bin/lightsailctl app local up --app %s --env %s", app, env)
+	if out, err := creds.SSHRun(ctx, cmd); err != nil {
+		return fmt.Errorf("remote up on %s: %s: %w", instance, out, err)
+	}
+	return nil
 }
 
 func saveConfigStep(ctx context.Context, st *registry.State) error {

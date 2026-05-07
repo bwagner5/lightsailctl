@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/bwagner5/triad/pkg/registry"
@@ -34,6 +35,14 @@ func enableGhActionOp(s *store, suggest func(context.Context) ([]registry.Choice
 	return registry.Operation{
 		Name: "enable-gh-action", Aliases: []string{"enable-ci"}, Key: "G",
 		Short: "set up a GitHub Actions deploy workflow for this app",
+		// Only surface the "enable" key binding when the workflow file
+		// isn't already sitting in the cwd. When it IS present,
+		// disable-gh-action takes its place on the status bar so the
+		// user isn't offered "enable" for a state that's already
+		// enabled. Both ops remain reachable via "?" help and the
+		// command palette, which is where the always-available copy
+		// belongs.
+		Enabled: func(_ any) bool { return !workflowFileInCwd() },
 		Fields: []registry.Field{
 			{Flag: "name", Short: "n", Help: "app name",
 				Prefill: names.DefaultAppName, Required: true, Suggest: suggest},
@@ -81,6 +90,12 @@ func disableGhActionOp(s *store, suggest func(context.Context) ([]registry.Choic
 		Name: "disable-gh-action", Aliases: []string{"disable-ci"}, Key: "shift+G",
 		Short:   "remove the GitHub Actions deploy workflow and its IAM role",
 		Confirm: "Delete the CI IAM role and local workflow file?",
+		// Mirror of enable-gh-action's Enabled: only show the key
+		// binding on the bottom bar when the workflow file IS
+		// present in cwd. Keeps enable/disable mutually exclusive on
+		// the always-on hint row without hiding either from the full
+		// help overlay or the command palette.
+		Enabled: func(_ any) bool { return workflowFileInCwd() },
 		Fields: []registry.Field{
 			{Flag: "name", Short: "n", Help: "app name",
 				Prefill: names.DefaultAppName, Required: true, Suggest: suggest},
@@ -138,6 +153,30 @@ func preloadGhActionFromConf(_ context.Context, in registry.Input) error {
 		in["region"] = cfg.Region
 	}
 	return nil
+}
+
+// workflowFileInCwd reports whether the canonical lightsail-deploy
+// GitHub Actions workflow file is present below the current working
+// directory. Used as a cheap, no-network heuristic for the TUI
+// Enabled predicates on enable-gh-action / disable-gh-action so only
+// the contextually relevant verb shows on the status bar.
+//
+// The check is scoped to cwd (not the app's repo, wherever that may
+// be) because the Enabled func runs on every render and we can't
+// afford an IAM ListRoles scan there. In the common case the user
+// runs lightsailctl from their app's repo root, which is exactly
+// where the workflow lives. When cwd is unrelated (e.g. the user is
+// browsing apps from elsewhere) both verbs default to "not enabled"
+// from this function's point of view, i.e. enable-gh-action shows and
+// disable-gh-action is hidden — users can still reach the hidden one
+// via "?" or ":".
+func workflowFileInCwd() bool {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(cwd, ghaction.WorkflowRelPath))
+	return err == nil && !info.IsDir()
 }
 
 // detectRemoteStep fills in --repo from the local git remote when it

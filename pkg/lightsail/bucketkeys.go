@@ -14,13 +14,22 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/lightsail"
+	lstypes "github.com/aws/aws-sdk-go-v2/service/lightsail/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/bwagner5/triad/pkg/trace"
 )
 
 // ownerPrefix is the S3 key prefix for bucket-access-key ownership records.
 // We write one JSON file per minted key; the presence/absence of a key file
 // tells other clients whether a live key slot is in use by us.
 const ownerPrefix = "_owners/"
+
+// staleKeyAge is how old an unused access key must be before the automatic
+// reaper will delete it on ErrBucketKeysExhausted. 5 minutes is long enough
+// to cover a newly-minted key whose owner is still bootstrapping (e.g.
+// running writeOwnership retries), but short enough that a leak from a
+// crashed prior run self-heals on the very next invocation.
+const staleKeyAge = 5 * time.Minute
 
 // BucketKey is a short-lived AWS access-key pair scoped to one Lightsail bucket.
 type BucketKey struct {
@@ -43,12 +52,61 @@ type Ownership struct {
 var ErrBucketKeysExhausted = errors.New("both bucket access-key slots are in use; try again later or rotate")
 
 // CreateBucketKey mints a new access key for the bucket. Returns
-// ErrBucketKeysExhausted if the 2-key limit is hit.
+// ErrBucketKeysExhausted if the 2-key limit is hit even after attempting
+// to reap stale unused keys on the bucket.
 //
 // After mint, we attempt to write an _owners/<keyID>.json marker into the
 // bucket via the new credentials. This is best-effort: if the bucket is too
 // new for the credentials to see (eventual consistency), we retry briefly.
 func (c *Client) CreateBucketKey(ctx context.Context, bucket string) (*BucketKey, error) {
+	key, err := c.mintBucketKeyRaw(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	// Best-effort ownership marker; callers don't need to care if this fails.
+	_ = writeOwnership(ctx, c.cfg.Region, key)
+	return key, nil
+}
+
+// mintBucketKeyRaw runs CreateBucketAccessKey with retry + on-limit reaping.
+// This is the bare mint used by the KeyCache singleflight path; it skips
+// writeOwnership (the cache runs that in the background after the key is
+// already registered, so a stalled ownership write can't leak the key).
+//
+// On ErrBucketKeysExhausted, it calls reapStaleBucketKeys (unused + older
+// than staleKeyAge) and retries once. If the reaper frees no slots, the
+// exhausted error is returned to the caller as-is.
+func (c *Client) mintBucketKeyRaw(ctx context.Context, bucket string) (*BucketKey, error) {
+	key, err := c.tryMintBucketKey(ctx, bucket)
+	if err == nil {
+		return key, nil
+	}
+	if !errors.Is(err, ErrBucketKeysExhausted) {
+		return nil, err
+	}
+	trace.Trace(ctx, "bucket keys exhausted, attempting reap",
+		"bucket", bucket, "region", c.cfg.Region, "maxAge", staleKeyAge)
+	reaped, rerr := c.reapStaleBucketKeys(ctx, bucket, staleKeyAge)
+	if rerr != nil {
+		trace.FromContext(ctx).WarnContext(ctx, "bucket key reap failed",
+			"bucket", bucket, "region", c.cfg.Region, "err", rerr)
+	}
+	if reaped == 0 {
+		trace.Trace(ctx, "no stale keys to reap; returning exhausted error",
+			"bucket", bucket, "region", c.cfg.Region)
+		return nil, err
+	}
+	trace.FromContext(ctx).InfoContext(ctx, "reaped stale bucket access keys",
+		"bucket", bucket, "region", c.cfg.Region, "reaped", reaped)
+	// Slots were freed — try one more time. If we still exhaust, return
+	// the fresh error so the caller knows reaping didn't help.
+	return c.tryMintBucketKey(ctx, bucket)
+}
+
+// tryMintBucketKey is the raw CreateBucketAccessKey call wrapped in the
+// standard RetryableLong policy with StopRetry on the typed "too many keys"
+// error.
+func (c *Client) tryMintBucketKey(ctx context.Context, bucket string) (*BucketKey, error) {
 	var out *lightsail.CreateBucketAccessKeyOutput
 	err := RetryableLong(ctx, func(ctx context.Context) error {
 		var cerr error
@@ -66,14 +124,72 @@ func (c *Client) CreateBucketKey(ctx context.Context, bucket string) (*BucketKey
 	if err != nil {
 		return nil, fmt.Errorf("create bucket access key: %w", err)
 	}
-	key := &BucketKey{
+	return &BucketKey{
 		Bucket:    bucket,
 		AccessKey: aws.ToString(out.AccessKey.AccessKeyId),
 		Secret:    aws.ToString(out.AccessKey.SecretAccessKey),
+	}, nil
+}
+
+// reapStaleBucketKeys deletes access keys on bucket that have never been
+// used and whose CreatedAt is older than maxAge. Returns the number of
+// keys reaped. All errors (list + per-key delete) are swallowed so a
+// reaper failure can't mask the caller's original error.
+//
+// "Never used" means AccessKey.LastUsed is nil or LastUsed.LastUsedDate
+// is nil — AWS returns these shapes interchangeably for a never-used key.
+// maxAge protects a freshly-minted key whose owner is still bootstrapping
+// (writeOwnership retries) from being reaped by a concurrent exhaustion
+// recovery attempt.
+func (c *Client) reapStaleBucketKeys(ctx context.Context, bucket string, maxAge time.Duration) (int, error) {
+	out, err := c.ls.GetBucketAccessKeys(ctx, &lightsail.GetBucketAccessKeysInput{
+		BucketName: aws.String(bucket),
+	})
+	if err != nil {
+		return 0, err
 	}
-	// Best-effort ownership marker; callers don't need to care if this fails.
-	_ = writeOwnership(ctx, c.cfg.Region, key)
-	return key, nil
+	now := time.Now()
+	reaped := 0
+	for _, ak := range out.AccessKeys {
+		if ak.AccessKeyId == nil {
+			continue
+		}
+		if !isStaleUnusedKey(ak.CreatedAt, ak.LastUsed, now, maxAge) {
+			continue
+		}
+		age := time.Duration(0)
+		if ak.CreatedAt != nil {
+			age = now.Sub(*ak.CreatedAt)
+		}
+		trace.FromContext(ctx).InfoContext(ctx, "reaping stale bucket access key",
+			"bucket", bucket, "region", c.cfg.Region,
+			"accessKeyID", aws.ToString(ak.AccessKeyId), "age", age.Round(time.Second))
+		_, derr := c.ls.DeleteBucketAccessKey(ctx, &lightsail.DeleteBucketAccessKeyInput{
+			BucketName:  aws.String(bucket),
+			AccessKeyId: ak.AccessKeyId,
+		})
+		if derr == nil {
+			reaped++
+		} else {
+			trace.FromContext(ctx).WarnContext(ctx, "reap delete failed",
+				"bucket", bucket, "region", c.cfg.Region,
+				"accessKeyID", aws.ToString(ak.AccessKeyId), "err", derr)
+		}
+	}
+	return reaped, nil
+}
+
+// isStaleUnusedKey reports whether an access key is eligible for the
+// auto-reaper. Rule: createdAt is known AND lastUsed is nil (or its
+// LastUsedDate is nil) AND now-createdAt >= maxAge.
+func isStaleUnusedKey(createdAt *time.Time, lastUsed *lstypes.AccessKeyLastUsed, now time.Time, maxAge time.Duration) bool {
+	if createdAt == nil {
+		return false
+	}
+	if lastUsed != nil && lastUsed.LastUsedDate != nil {
+		return false
+	}
+	return now.Sub(*createdAt) >= maxAge
 }
 
 // DeleteBucketKey removes a bucket access key and its ownership marker.
@@ -93,24 +209,27 @@ func (c *Client) DeleteBucketKey(ctx context.Context, bucket, accessKeyID string
 // S3ClientFor returns an *s3.Client scoped to a single Lightsail bucket via a
 // freshly-minted access key, plus a cleanup func the caller must defer.
 // If a cached key exists, returns it immediately with a no-op cleanup.
+//
+// Concurrent callers on the same bucket share one mint via the KeyCache's
+// singleflight; only one CreateBucketAccessKey API call is in flight per
+// bucket at any time. The minted key is registered with the cache before
+// any ownership-marker write runs, so an interrupted writeOwnership can't
+// leak the key — CloseKeyCache will always reclaim what's in the cache.
 func (c *Client) S3ClientFor(ctx context.Context, bucket string) (*s3.Client, func(), error) {
-	// Check cache first.
 	if c.keyCache != nil {
-		if s3cli, ok := c.keyCache.Get(bucket); ok {
-			return s3cli, func() {}, nil
+		s3cli, err := c.keyCache.getOrMint(ctx, c, bucket)
+		if err != nil {
+			return nil, nil, err
 		}
+		// Cache owns the lifecycle; caller's cleanup is a no-op.
+		return s3cli, func() {}, nil
 	}
+	// No cache — legacy per-call cleanup.
 	key, err := c.CreateBucketKey(ctx, bucket)
 	if err != nil {
 		return nil, nil, err
 	}
 	s3cli := s3AdminClient(c.cfg.Region, key)
-	// Store in cache; cache owns the lifecycle now.
-	if c.keyCache != nil {
-		c.keyCache.Put(bucket, key, s3cli, c.cfg.Region)
-		return s3cli, func() {}, nil
-	}
-	// No cache — legacy cleanup path.
 	cleanup := func() {
 		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -204,11 +323,20 @@ func (c *Client) ReadOwnerships(ctx context.Context, bucket string) ([]Ownership
 }
 
 func isTooManyKeys(err error) bool {
-	// Lightsail returns a ServiceException like:
-	//   "The bucket already has 2 access keys. Delete an existing key..."
-	// Match on the text since the SDK doesn't expose a typed error for it.
+	// Lightsail returns an InvalidInputException whose message varies
+	// by region / SDK version. Observed phrasings:
+	//   "You have reached the limit of access keys for <bucket>"   (current)
+	//   "The bucket already has 2 access keys. Delete an existing key…"
+	//   "You have created the maximum number of access keys…"
+	// The SDK doesn't expose a typed error for this case, so we match on
+	// the message. Keep the list conservative — false positives turn a
+	// transient error into a hard failure.
 	s := err.Error()
-	for _, needle := range []string{"already has 2 access keys", "maximum number of access keys"} {
+	for _, needle := range []string{
+		"reached the limit of access keys",
+		"already has 2 access keys",
+		"maximum number of access keys",
+	} {
 		if containsFold(s, needle) {
 			return true
 		}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -38,18 +39,22 @@ func Upload(ctx context.Context, s3cli *s3.Client, bucket, key, localPath string
 }
 
 // WaitForHealthy polls status.json files in the env bucket until every
-// container on every tagged instance is "running", or timeout elapses. It
-// returns nil when healthy, context.DeadlineExceeded on timeout (caller can
-// downgrade to a warning), or any other error for hard failures.
+// container on every tagged instance is "running" AND the watcher has
+// applied the specific `asset` key we just uploaded, or timeout elapses.
+// It returns nil when healthy, context.DeadlineExceeded on timeout (caller
+// may surface as a warning/error), or any other error for hard failures.
 //
-// `since` filters out status writes that happened before this deploy — we
-// only trust reports from watchers that saw our tarball.
-func WaitForHealthy(ctx context.Context, c *lightsail.Client, bucket string, since time.Time, poll time.Duration) error {
+// `since` filters out status writes that happened before this deploy.
+// `asset` is the S3 key of the deploy tarball (e.g. "deploy/172000-abcd.tar.gz");
+// we require every reporting instance's LastDeploy.ObjectURL to end with it
+// so an "idle" or stale-but-fresh-timestamp report doesn't slip through as
+// healthy.
+func WaitForHealthy(ctx context.Context, c *lightsail.Client, bucket, asset string, since time.Time, poll time.Duration) error {
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	for {
 		statuses, err := c.ReadBucketStatuses(ctx, bucket)
-		if err == nil && allHealthy(statuses, since) {
+		if err == nil && allHealthy(statuses, asset, since) {
 			return nil
 		}
 		select {
@@ -60,13 +65,31 @@ func WaitForHealthy(ctx context.Context, c *lightsail.Client, bucket string, sin
 	}
 }
 
-func allHealthy(statuses []lightsail.Status, since time.Time) bool {
+// allHealthy returns true when every instance's watcher report shows:
+//   - a fresh timestamp (after `since`, so no leftover from a previous run),
+//   - LastDeploy pointing at our specific `asset` (so the watcher has
+//     downloaded and applied THIS deploy, not a prior one),
+//   - rolled-up Status == "healthy" (the watcher only emits this when
+//     every container is running; idle/degraded/down all fail here),
+//   - at least one container, every container's Status == "running"
+//     (defense-in-depth in case a future watcher version sets Status
+//     differently).
+//
+// An empty `statuses` slice means no watchers have reported yet — return
+// false so the caller keeps polling.
+func allHealthy(statuses []lightsail.Status, asset string, since time.Time) bool {
 	if len(statuses) == 0 {
 		return false
 	}
 	for _, s := range statuses {
 		if s.Timestamp.Before(since) {
-			return false // stale report
+			return false // stale report from before this deploy
+		}
+		if s.LastDeploy == nil || !strings.HasSuffix(s.LastDeploy.ObjectURL, asset) {
+			return false // watcher hasn't applied our tarball yet
+		}
+		if s.Status != "healthy" {
+			return false // idle / degraded / down / unknown
 		}
 		if len(s.Containers) == 0 {
 			return false

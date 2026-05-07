@@ -283,3 +283,74 @@ func TestStore_InteractiveNilPointer(t *testing.T) {
 		t.Errorf("*true = non-interactive")
 	}
 }
+
+// TestWorkflowFileInCwd_MatchesEnabledPredicates pins the Enabled
+// predicates on enable-gh-action / disable-gh-action to
+// workflowFileInCwd()'s return value, and exercises both branches.
+//
+// This is the regression guard for the status-bar decluttering
+// change: only the contextually relevant verb (enable vs. disable)
+// should surface on the bottom hint row; both remain reachable via
+// the "?" help overlay and the command palette.
+func TestWorkflowFileInCwd_MatchesEnabledPredicates(t *testing.T) {
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	enable := enableGhActionOp(&store{}, nil)
+	disable := disableGhActionOp(&store{}, nil)
+	if enable.Enabled == nil || disable.Enabled == nil {
+		t.Fatal("enable/disable ops must each have an Enabled predicate")
+	}
+
+	// 1) No workflow file → enable is ON, disable is OFF.
+	if workflowFileInCwd() {
+		t.Fatal("workflowFileInCwd true in empty tempdir")
+	}
+	if !enable.Enabled(nil) {
+		t.Errorf("enable should be enabled when workflow file is absent")
+	}
+	if disable.Enabled(nil) {
+		t.Errorf("disable should be DISabled when workflow file is absent")
+	}
+
+	// 2) Drop the workflow file → enable flips OFF, disable flips ON.
+	wfPath := filepath.Join(dir, ghaction.WorkflowRelPath)
+	if err := os.MkdirAll(filepath.Dir(wfPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(wfPath, []byte("name: Lightsail deploy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !workflowFileInCwd() {
+		t.Fatal("workflowFileInCwd false after writing file")
+	}
+	if enable.Enabled(nil) {
+		t.Errorf("enable should be DISabled when workflow file is present")
+	}
+	if !disable.Enabled(nil) {
+		t.Errorf("disable should be enabled when workflow file is present")
+	}
+}
+
+// TestCreateOp_HiddenFromStatusBar confirms the "c" create binding
+// opts out of the always-on status bar (but remains key-dispatchable
+// and visible in "?" help / palette).
+func TestCreateOp_HiddenFromStatusBar(t *testing.T) {
+	region := ""
+	r := Resource(&region, nil)
+	op, ok := r.Operations["create"]
+	if !ok {
+		t.Fatal("create operation not registered")
+	}
+	if !op.HideFromStatusBar {
+		t.Error("create op should have HideFromStatusBar=true to keep the bottom bar uncluttered")
+	}
+	if op.Key == "" {
+		t.Error("create op should still have a Key so it's reachable from '?' help")
+	}
+}

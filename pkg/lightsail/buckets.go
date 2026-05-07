@@ -113,6 +113,16 @@ func (c *Client) StreamBuckets(ctx context.Context) <-chan BucketBatch {
 			go func(region string) {
 				defer wg.Done()
 				bs, err := c.WithRegion(region).ListBuckets(ctx)
+				if err != nil {
+					// Regions that require opt-in, or partial outages,
+					// surface here as SDK errors. Log at INFO with the
+					// region so the user can tell at a glance which
+					// region produced each StatusCode 400 line. Caller
+					// (StreamList) still swallows the Batch.Err for the
+					// table render — this log is the diagnostic trail.
+					trace.FromContext(ctx).InfoContext(ctx, "list buckets failed for region",
+						"region", region, "err", err)
+				}
 				select {
 				case <-ctx.Done():
 				case out <- BucketBatch{Region: region, Buckets: bs, Err: err}:

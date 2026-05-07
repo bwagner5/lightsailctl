@@ -27,8 +27,9 @@ func addTargetOp(s *store) registry.Operation {
 				Required: true, Prefill: names.DefaultAppName, Validate: names.ValidateLabel},
 			{Flag: "env", Short: "e", Label: "Environment", Help: "environment",
 				Required: true, Default: "dev", Validate: names.ValidateLabel},
-			{Flag: "instance", Short: "i", Label: "Lightsail instance",
-				Help: "target Lightsail instance to add", Required: true,
+			{Flag: "instance", Short: "i", Label: "Lightsail instances",
+				Help:     "target Lightsail instance(s) to add (comma-separated accepts multiple)",
+				Required: true, Multi: true,
 				Suggest: instanceSuggest(s)},
 			{Flag: "agent-path", Label: "Agent binary",
 				Help: "linux/amd64 lightsailctl binary to scp to the instance",
@@ -56,14 +57,39 @@ func addTargetOp(s *store) registry.Operation {
 }
 
 func addTargetPre(ctx context.Context, in registry.Input) error {
-	if err := preloadFromConf(ctx, in); err != nil {
-		return err
+	// Hydrate app / env / region / agent-path from lightsail.conf, but
+	// DO NOT touch the instance field. add-target is specifically for
+	// bringing a *new* instance into the rotation — pre-populating it
+	// with the conf's existing single-instance value (the one the app
+	// was bootstrapped on) would make the wizard's "already set" fast
+	// path skip the multi-select picker entirely, and the saga would
+	// march straight into the duplicate-check step with the instance
+	// that's already tagged. Users would see the duplicate error with
+	// no picker ever appearing, exactly the symptom reported in
+	// https://github.com/aws/lightsailctl (TUI add-target: "Where is
+	// the overlay with multi-select for the instances?").
+	if cfg, _ := config.LoadFromCwd(); cfg != nil {
+		if in.Get("name") == "" && cfg.App != "" {
+			in["name"] = cfg.App
+		}
+		if in.Get("env") == "" && cfg.Env != "" {
+			in["env"] = cfg.Env
+		}
+		if in.Get("region") == "" && cfg.Region != "" {
+			in["region"] = cfg.Region
+		}
+		if in.Get("agent-path") == "" && cfg.AgentPath != "" {
+			in["agent-path"] = cfg.AgentPath
+		}
 	}
 	preresolveAgentBinary(ctx, in)
 	return nil
 }
 
 // addTargetValidateStep confirms the env bucket exists (app must be created first).
+// When multiple instances are requested the first one seeds the region
+// lookup; all selected instances must live in the same region (a later
+// per-instance step rejects mismatches).
 func addTargetValidateStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		c, err := s.ensure(ctx)
@@ -76,11 +102,17 @@ func addTargetValidateStep(s *store) func(context.Context, *registry.State) erro
 		}
 		st.Data["acct"] = acct
 		bucket := lightsail.EnvBucketName(acct, st.Input.Get("name"), st.Input.Get("env"))
-		// We need to know the region to check the bucket. Resolve it
-		// from the instance first.
-		inst, err := c.GetInstance(ctx, st.Input.Get("instance"))
+		instances := st.Input.Multi("instance")
+		if len(instances) == 0 {
+			return fmt.Errorf("at least one instance is required")
+		}
+		// Region is derived from the first instance; downstream
+		// per-instance steps will fail if other instances live in a
+		// different region, which is the correct outcome since an
+		// app/env bucket is regional.
+		inst, err := c.GetInstance(ctx, instances[0])
 		if err != nil {
-			return fmt.Errorf("instance %q not found: %w", st.Input.Get("instance"), err)
+			return fmt.Errorf("instance %q not found: %w", instances[0], err)
 		}
 		if inst.Region != "" {
 			st.Input["region"] = inst.Region
@@ -95,7 +127,9 @@ func addTargetValidateStep(s *store) func(context.Context, *registry.State) erro
 	}
 }
 
-// addTargetCheckDuplicateStep fails if the instance is already tagged for this app/env.
+// addTargetCheckDuplicateStep fails if any selected instance is already
+// tagged for this app/env. All requested instances are checked so the
+// user sees one clear error listing every duplicate in one pass.
 func addTargetCheckDuplicateStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		c, err := s.ensure(ctx)
@@ -106,18 +140,31 @@ func addTargetCheckDuplicateStep(s *store) func(context.Context, *registry.State
 		if err != nil {
 			return err
 		}
-		instance := st.Input.Get("instance")
+		existing := map[string]bool{}
 		for _, t := range targets {
-			if t.Name == instance {
-				return fmt.Errorf("instance %q is already a target for %s/%s",
-					instance, st.Input.Get("name"), st.Input.Get("env"))
+			existing[t.Name] = true
+		}
+		var dup []string
+		for _, inst := range st.Input.Multi("instance") {
+			if existing[inst] {
+				dup = append(dup, inst)
 			}
+		}
+		if len(dup) == 1 {
+			return fmt.Errorf("instance %q is already a target for %s/%s",
+				dup[0], st.Input.Get("name"), st.Input.Get("env"))
+		}
+		if len(dup) > 1 {
+			return fmt.Errorf("instances %v are already targets for %s/%s",
+				dup, st.Input.Get("name"), st.Input.Get("env"))
 		}
 		return nil
 	}
 }
 
-// addTargetFirewallStep opens compose ports on the new target instance.
+// addTargetFirewallStep opens compose ports on every new target instance.
+// Compose parsing is done once up front so errors / "no ports" short-circuit
+// before opening any SSH sessions.
 func addTargetFirewallStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		composePath := compose.Find()
@@ -132,12 +179,16 @@ func addTargetFirewallStep(s *store) func(context.Context, *registry.State) erro
 		if err != nil {
 			return err
 		}
-		_, _ = c.OpenFirewallPorts(ctx, st.Input.Get("instance"), ports)
+		for _, inst := range st.Input.Multi("instance") {
+			_, _ = c.OpenFirewallPorts(ctx, inst, ports)
+		}
 		return nil
 	}
 }
 
-// addTargetSaveConfStep appends the new instance to lightsail.conf's Instances list.
+// addTargetSaveConfStep appends every added instance to lightsail.conf's
+// Instances list (deduplicated) and keeps the legacy Instance scalar
+// populated for older tooling that still reads it.
 func addTargetSaveConfStep(_ context.Context, st *registry.State) error {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -151,20 +202,22 @@ func addTargetSaveConfStep(_ context.Context, st *registry.State) error {
 	cfg.App = st.Input.Get("name")
 	cfg.Env = st.Input.Get("env")
 	cfg.Region = st.Input.Get("region")
-	// Append the new instance to the list, deduplicating.
-	instance := st.Input.Get("instance")
-	found := false
+	// Append every new instance, deduplicating against whatever the
+	// conf already had. Order preserved so `lightsail.conf` reads the
+	// same as the user's selection.
+	seen := map[string]bool{}
 	for _, inst := range cfg.Instances {
-		if inst == instance {
-			found = true
-			break
-		}
+		seen[inst] = true
 	}
-	if !found {
-		cfg.Instances = append(cfg.Instances, instance)
+	for _, inst := range st.Input.Multi("instance") {
+		if inst == "" || seen[inst] {
+			continue
+		}
+		cfg.Instances = append(cfg.Instances, inst)
+		seen[inst] = true
 	}
 	// Ensure legacy Instance field is also populated.
-	if cfg.Instance == "" {
+	if cfg.Instance == "" && len(cfg.Instances) > 0 {
 		cfg.Instance = cfg.Instances[0]
 	}
 	return cfg.Save(p)

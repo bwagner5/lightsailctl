@@ -71,92 +71,94 @@ func overviewRows(a App) []registry.DetailRow {
 	return rows
 }
 
-// envSections renders ONE environment into one or two sections:
-// an "Environment: <env>" section (instance / health / last deploy),
-// followed by a "Services (<env>)" section per instance that has at
-// least one container. Services is split out so container rows sit
-// under an explicit heading rather than free-floating under the env.
+// envSections renders one environment as a single "Environment: <env>"
+// section whose rows encode the full instance → service → endpoint
+// hierarchy via label indentation. Tree shape:
+//
+//	Environment: dev
+//	  <instance-a>:   ● healthy  deployed 5m ago
+//	    <svc1>:       ● running  up 5m ago
+//	      Endpoint:   http://…:8080
+//	    <svc2>:       ● running  up 5m ago
+//	      Endpoint:   http://…:8081
+//	  <instance-b>:   ● healthy  deployed 5m ago
+//	    <svc1>:       ● running  up 5m ago
+//	      Endpoint:   http://…:8080
+//
+// Rationale: the prior layout emitted two sections per instance
+// ("Environment: dev" + "Services (dev)"), so a two-instance env
+// produced four sibling sections with the same "Environment: dev"
+// heading repeated twice. Users couldn't tell at a glance which
+// services belonged to which instance, and the duplicated headings
+// read as a rendering bug rather than a hierarchy. One section per
+// env with indented rows gives a single anchor and makes ownership
+// obvious.
 func envSections(env string, a App) []registry.DetailSection {
 	statuses := a.envStatuses[env]
-	envTitle := "Environment: " + env
+	title := "Environment: " + env
 
 	if len(statuses) == 0 {
 		return []registry.DetailSection{{
-			Title: envTitle,
+			Title: title,
 			Rows:  []registry.DetailRow{{Label: "Status", Value: "not deployed"}},
 		}}
 	}
 
-	var out []registry.DetailSection
+	var rows []registry.DetailRow
 	for _, st := range statuses {
-		envRows := []registry.DetailRow{
-			{Label: "Instance", Value: st.Instance},
-			{Label: "Health", Value: statusBadge(st.Status)},
-		}
-		if st.LastDeploy != nil && !st.LastDeploy.Timestamp.IsZero() {
-			envRows = append(envRows, registry.DetailRow{
-				Label: "Last deploy",
-				Value: relativeTime(st.LastDeploy.Timestamp) + "  (" + st.LastDeploy.Timestamp.Format("Jan 2 15:04 MST") + ")",
-			})
-		}
-		out = append(out, registry.DetailSection{Title: envTitle, Rows: envRows})
-
-		if len(st.Containers) == 0 {
-			// Fall back to flat endpoints if we have any but no
-			// containers to attach them to (rare, but keeps the
-			// information visible).
-			if len(st.Endpoints) > 0 {
-				var epRows []registry.DetailRow
-				for _, ep := range st.Endpoints {
-					epRows = append(epRows, registry.DetailRow{Label: "  Endpoint", Value: ep})
-				}
-				out = append(out, registry.DetailSection{Title: "Endpoints (" + env + ")", Rows: epRows})
-			}
-			continue
-		}
-
-		svcRows := serviceRows(st)
-		out = append(out, registry.DetailSection{Title: "Services (" + env + ")", Rows: svcRows})
+		rows = append(rows, instanceRows(st)...)
 	}
-	return out
+	return []registry.DetailSection{{Title: title, Rows: rows}}
 }
 
-// serviceRows builds the indented per-service rows:
-//
-//	svc1: ● running  up 4m ago
-//	  Endpoint: http://1.2.3.4:8080
-//
-// It prefers ContainerStatus.Service (the compose service name) over
-// Name (the concrete container), because the service name is what
-// the user wrote in compose.yml and what they use with `docker
-// compose logs <svc>`. Image is shown only when it's a real registry
-// reference (has "/" or ":"), not when compose auto-generated it from
-// the project/service pair (e.g. "current-svc1").
-func serviceRows(st lightsail.Status) []registry.DetailRow {
-	var rows []registry.DetailRow
+// instanceRows renders one Status (= one instance's watcher report)
+// as a header row plus nested service / endpoint rows. Indentation
+// convention: 0 = instance, 2 = service, 4 = endpoint.
+func instanceRows(st lightsail.Status) []registry.DetailRow {
+	// Header row: instance name as label, health + last-deploy as value.
+	// Keeping the timestamp inside the value (instead of a dedicated
+	// "Last deploy" row) keeps each instance block compact and avoids
+	// repeating three label columns per instance.
+	//
+	// The label suffix " (instance)" makes the row's role explicit so
+	// readers can tell at a glance that "burning-nebula" is a
+	// Lightsail instance rather than, say, another environment name
+	// or a service. Indented child rows (services, endpoints) carry
+	// no suffix because their indentation already signals their kind.
+	val := statusBadge(st.Status)
+	if st.LastDeploy != nil && !st.LastDeploy.Timestamp.IsZero() {
+		val += "  deployed " + relativeTime(st.LastDeploy.Timestamp) +
+			"  (" + st.LastDeploy.Timestamp.Format("Jan 2 15:04 MST") + ")"
+	}
+	rows := []registry.DetailRow{{Label: st.Instance + " (instance)", Value: val}}
+
+	// Services & endpoints indented under the instance. If there are
+	// no containers yet (e.g. idle, still bootstrapping) but we have
+	// env-level endpoints, surface them as unattributed rows under
+	// the instance so the information isn't lost.
+	if len(st.Containers) == 0 {
+		for _, ep := range st.Endpoints {
+			rows = append(rows, registry.DetailRow{Label: "  Endpoint", Value: ep})
+		}
+		return rows
+	}
 	for _, c := range st.Containers {
-		label := "  " + serviceLabel(c)
-		val := statusBadge(c.Status)
+		cval := statusBadge(c.Status)
 		if !c.StartedAt.IsZero() {
-			val += "  up " + relativeTime(c.StartedAt)
+			cval += "  up " + relativeTime(c.StartedAt)
 		}
 		if showImage(c) {
-			val += "  " + c.Image
+			cval += "  " + c.Image
 		}
-		rows = append(rows, registry.DetailRow{Label: label, Value: val})
-
-		// Prefer per-container endpoints. Fall back to nothing if
-		// unset; the env-level Endpoints have already been split
-		// across containers by the watcher.
+		rows = append(rows, registry.DetailRow{Label: "  " + serviceLabel(c), Value: cval})
 		for _, ep := range c.Endpoints {
 			rows = append(rows, registry.DetailRow{Label: "    Endpoint", Value: ep})
 		}
 	}
-
-	// If the watcher reported env-level endpoints but none were
-	// attributed to containers (older watchers, pre per-container
-	// Endpoints), append them as unattributed rows so the information
-	// isn't lost.
+	// Compat: older watchers set Status.Endpoints but not per-container
+	// Endpoints. Attach those to the instance (indented one level past
+	// the instance, same as Container endpoints' first level) so the
+	// user can still see them.
 	if !anyContainerEndpoints(st.Containers) {
 		for _, ep := range st.Endpoints {
 			rows = append(rows, registry.DetailRow{Label: "  Endpoint", Value: ep})

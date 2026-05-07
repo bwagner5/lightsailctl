@@ -105,8 +105,13 @@ func (s *store) List(ctx context.Context, _ registry.Filter) ([]any, error) {
 	return aggregate(buckets), nil
 }
 
-// StreamList fans out across regions and emits one batch per region as it
-// completes. Satisfies registry.StreamStore so the TUI renders progressively.
+// StreamList fans out across regions and emits one batch per region as
+// it completes. Rows carry only the fields derivable from the bucket
+// list itself (Name, Envs, Region, State, Age). Everything else
+// (Status, Instances, Endpoints) is populated per-row by Field.Async
+// loaders in the TUI, which hit ReadBucketStatuses via the shared
+// statuses cache — one real S3 round-trip per bucket per refresh no
+// matter how many columns derive from it.
 func (s *store) StreamList(ctx context.Context, _ registry.Filter) <-chan registry.Batch {
 	out := make(chan registry.Batch, 16)
 	go func() {
@@ -122,7 +127,6 @@ func (s *store) StreamList(ctx context.Context, _ registry.Filter) <-chan regist
 				// (error would otherwise show as a toast for every such region).
 				continue
 			}
-			// Filter to app-prefixed buckets and aggregate this region's slice.
 			var appBuckets []lightsail.Bucket
 			for _, bucket := range b.Buckets {
 				if strings.HasPrefix(bucket.Name, lightsail.BucketPrefix) {
@@ -132,23 +136,7 @@ func (s *store) StreamList(ctx context.Context, _ registry.Filter) <-chan regist
 			if len(appBuckets) == 0 {
 				continue
 			}
-			// Pre-fetch bucket access keys in the background so detail
-			// views and status reads are instant cache hits.
-			bucketNames := make([]string, len(appBuckets))
-			for i, bkt := range appBuckets {
-				bucketNames[i] = bkt.Name
-			}
-			c.WithRegion(b.Region).WarmKeyCache(ctx, bucketNames)
-
 			rows := aggregate(appBuckets)
-			// Ship rows immediately. enrich used to run synchronously
-			// before publishing, adding per-app AWS calls
-			// (FindTargetsForAppEnv + ReadBucketStatuses) that could
-			// block the batch by 10+ seconds under load — which made a
-			// newly-created app invisible in the table until every
-			// other app's enrichment finished. Columns that depend on
-			// enrichment (Instances / Endpoints / Status) populate via
-			// the detail view / Get path instead.
 			select {
 			case <-ctx.Done():
 				return
@@ -162,66 +150,221 @@ func (s *store) StreamList(ctx context.Context, _ registry.Filter) <-chan regist
 // enrich mutates each App row in rows with Instances (from ls:app:<name>:<env>
 // tags) and Endpoints + Status (from <instance>_status.json files in the
 // env buckets). Best-effort: any failure leaves fields blank.
+//
+// Used only by the single-row Get path (detail view). The TUI list view
+// populates Status / Instances / Endpoints via Field.Async loaders that
+// share a per-bucket memoized read through Client.FetchBucketStatuses.
 func enrich(ctx context.Context, c *lightsail.Client, rows []any) {
 	for i, it := range rows {
 		a := it.(App)
-		instances := map[string]struct{}{}
-		endpoints := []string{}
-		var statusParts []string
-		for _, env := range strings.Split(a.Envs, ",") {
-			if env == "" {
+		enrichOne(ctx, c, &a)
+		rows[i] = a
+	}
+}
+
+// statusLoader returns a Field.Async that summarizes container health
+// per env. Reads each env bucket's status files through the Client's
+// short-TTL memo, so the three async loaders on the same bucket
+// (Status / Instances / Endpoints) share one S3 round-trip per refresh.
+func statusLoader(s *store) func(ctx context.Context, item any) (string, error) {
+	return func(ctx context.Context, item any) (string, error) {
+		a, ok := item.(App)
+		if !ok {
+			return "", nil
+		}
+		c, rerr := s.ensure(ctx)
+		if rerr != nil {
+			return "", rerr
+		}
+		rc := c.WithRegion(a.Region)
+		var parts []string
+		for _, env := range splitEnvs(a.Envs) {
+			bucket := a.envBuckets[env]
+			if bucket == "" {
 				continue
 			}
-			targets, _ := c.FindTargetsForAppEnv(ctx, a.Name, env)
-			for _, t := range targets {
-				instances[t.Name] = struct{}{}
+			statuses, err := rc.FetchBucketStatuses(ctx, bucket)
+			if err != nil || len(statuses) == 0 {
+				continue
 			}
-			// Status from env bucket (best-effort; bucket may not exist yet).
-			envBucket := a.envBuckets[env]
-			if envBucket != "" {
-				statuses, err := c.ReadBucketStatuses(ctx, envBucket)
-				if a.envStatuses == nil {
-					a.envStatuses = map[string][]lightsail.Status{}
-				}
-				if err == nil {
-					a.envStatuses[env] = statuses
-					healthy, total := 0, 0
-					for _, st := range statuses {
-						for _, ctr := range st.Containers {
-							total++
-							if ctr.Status == "running" {
-								healthy++
-							}
-						}
-						endpoints = append(endpoints, st.Endpoints...)
+			healthy, total := 0, 0
+			for _, st := range statuses {
+				for _, ctr := range st.Containers {
+					total++
+					if ctr.Status == "running" {
+						healthy++
 					}
-					if total > 0 {
-						if len(statuses) > 1 {
-							statusParts = append(statusParts, fmt.Sprintf("%s: %d/%d on %d instances", env, healthy, total, len(statuses)))
-						} else {
-							statusParts = append(statusParts, fmt.Sprintf("%s: %d/%d", env, healthy, total))
-						}
-					}
-				} else {
-					a.envStatuses[env] = nil
 				}
 			}
-		}
-		if len(instances) > 0 {
-			names := make([]string, 0, len(instances))
-			for n := range instances {
-				names = append(names, n)
+			if total == 0 {
+				continue
 			}
-			sort.Strings(names)
-			a.Instances = strings.Join(names, ",")
+			if len(statuses) > 1 {
+				parts = append(parts, fmt.Sprintf("%s: %d/%d on %d instances", env, healthy, total, len(statuses)))
+			} else {
+				parts = append(parts, fmt.Sprintf("%s: %d/%d", env, healthy, total))
+			}
 		}
-		if len(endpoints) > 0 {
-			a.Endpoints = strings.Join(dedupeStrings(endpoints), ",")
+		return strings.Join(parts, " · "), nil
+	}
+}
+
+// instancesLoader returns a Field.Async that lists the instance names
+// currently reporting status in any env bucket. Derived from the same
+// ReadBucketStatuses memo as Status / Endpoints — no separate
+// ListInstances / tag lookup. Trade-off: an instance tagged as a
+// target but not yet reporting a status file won't appear in the
+// table; the detail view still surfaces targets via the tag path.
+func instancesLoader(s *store) func(ctx context.Context, item any) (string, error) {
+	return func(ctx context.Context, item any) (string, error) {
+		a, ok := item.(App)
+		if !ok {
+			return "", nil
 		}
-		if len(statusParts) > 0 {
-			a.Status = strings.Join(statusParts, " · ")
+		c, rerr := s.ensure(ctx)
+		if rerr != nil {
+			return "", rerr
 		}
-		rows[i] = a
+		rc := c.WithRegion(a.Region)
+		names := map[string]struct{}{}
+		for _, env := range splitEnvs(a.Envs) {
+			bucket := a.envBuckets[env]
+			if bucket == "" {
+				continue
+			}
+			statuses, err := rc.FetchBucketStatuses(ctx, bucket)
+			if err != nil {
+				continue
+			}
+			for _, st := range statuses {
+				if st.Instance != "" {
+					names[st.Instance] = struct{}{}
+				}
+			}
+		}
+		if len(names) == 0 {
+			return "", nil
+		}
+		out := make([]string, 0, len(names))
+		for n := range names {
+			out = append(out, n)
+		}
+		sort.Strings(out)
+		return strings.Join(out, ","), nil
+	}
+}
+
+// endpointsLoader returns a Field.Async that concatenates live endpoint
+// URLs across every env's status files. Shares the ReadBucketStatuses
+// memo with Status and Instances.
+func endpointsLoader(s *store) func(ctx context.Context, item any) (string, error) {
+	return func(ctx context.Context, item any) (string, error) {
+		a, ok := item.(App)
+		if !ok {
+			return "", nil
+		}
+		c, rerr := s.ensure(ctx)
+		if rerr != nil {
+			return "", rerr
+		}
+		rc := c.WithRegion(a.Region)
+		var endpoints []string
+		for _, env := range splitEnvs(a.Envs) {
+			bucket := a.envBuckets[env]
+			if bucket == "" {
+				continue
+			}
+			statuses, err := rc.FetchBucketStatuses(ctx, bucket)
+			if err != nil {
+				continue
+			}
+			for _, st := range statuses {
+				endpoints = append(endpoints, st.Endpoints...)
+			}
+		}
+		if len(endpoints) == 0 {
+			return "", nil
+		}
+		return strings.Join(dedupeStrings(endpoints), ","), nil
+	}
+}
+
+// splitEnvs parses a comma-joined env list and drops empty entries so
+// loaders don't need to repeat the strings.Split / empty-skip boilerplate.
+func splitEnvs(csv string) []string {
+	if csv == "" {
+		return nil
+	}
+	parts := strings.Split(csv, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// enrichOne fills Instances / Endpoints / Status + envStatuses for a
+// single App using region-pinned client c. Best-effort — partial data
+// leaves the corresponding fields blank.
+func enrichOne(ctx context.Context, c *lightsail.Client, a *App) {
+	instances := map[string]struct{}{}
+	var endpoints []string
+	var statusParts []string
+	for _, env := range strings.Split(a.Envs, ",") {
+		if env == "" {
+			continue
+		}
+		targets, _ := c.FindTargetsForAppEnv(ctx, a.Name, env)
+		for _, t := range targets {
+			instances[t.Name] = struct{}{}
+		}
+		// Status from env bucket (best-effort; bucket may not exist yet).
+		envBucket := a.envBuckets[env]
+		if envBucket == "" {
+			continue
+		}
+		if a.envStatuses == nil {
+			a.envStatuses = map[string][]lightsail.Status{}
+		}
+		statuses, err := c.ReadBucketStatuses(ctx, envBucket)
+		if err != nil {
+			a.envStatuses[env] = nil
+			continue
+		}
+		a.envStatuses[env] = statuses
+		healthy, total := 0, 0
+		for _, st := range statuses {
+			for _, ctr := range st.Containers {
+				total++
+				if ctr.Status == "running" {
+					healthy++
+				}
+			}
+			endpoints = append(endpoints, st.Endpoints...)
+		}
+		if total > 0 {
+			if len(statuses) > 1 {
+				statusParts = append(statusParts, fmt.Sprintf("%s: %d/%d on %d instances", env, healthy, total, len(statuses)))
+			} else {
+				statusParts = append(statusParts, fmt.Sprintf("%s: %d/%d", env, healthy, total))
+			}
+		}
+	}
+	if len(instances) > 0 {
+		names := make([]string, 0, len(instances))
+		for n := range instances {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		a.Instances = strings.Join(names, ",")
+	}
+	if len(endpoints) > 0 {
+		a.Endpoints = strings.Join(dedupeStrings(endpoints), ",")
+	}
+	if len(statusParts) > 0 {
+		a.Status = strings.Join(statusParts, " · ")
 	}
 }
 
@@ -336,6 +479,7 @@ func Resource(region *string, regionHints []string) registry.Resource {
 // don't silently provision IAM for an unattended session. Passing nil
 // is equivalent to "always interactive".
 func ResourceWithOptions(region *string, regionHints []string, nonInteractive *bool) registry.Resource {
+	st := &store{region: region, regionHints: regionHints, nonInteractive: nonInteractive}
 	fields := []registry.Field{
 		{Name: "Name", Flag: "name", Short: "n", Help: "application name",
 			Prefill: names.DefaultAppName, Table: registry.TableHint{Header: "NAME"}},
@@ -348,13 +492,15 @@ func ResourceWithOptions(region *string, regionHints []string, nonInteractive *b
 		{Name: "Age", Flag: "age", Help: "created",
 			Table: registry.TableHint{Header: "AGE", Tick: true}},
 		{Name: "Status", Flag: "status", Help: "rolled-up health",
-			Table: registry.TableHint{Header: "STATUS"}},
+			Table: registry.TableHint{Header: "STATUS"},
+			Async: statusLoader(st)},
 		{Name: "Instances", Flag: "instances", Help: "target instances",
-			Table: registry.TableHint{Header: "INSTANCES", Wide: true}},
+			Table: registry.TableHint{Header: "INSTANCES", Wide: true},
+			Async: instancesLoader(st)},
 		{Name: "Endpoints", Flag: "endpoints", Help: "live endpoints",
-			Table: registry.TableHint{Header: "ENDPOINTS", Wide: true}},
+			Table: registry.TableHint{Header: "ENDPOINTS", Wide: true},
+			Async: endpointsLoader(st)},
 	}
-	st := &store{region: region, regionHints: regionHints, nonInteractive: nonInteractive}
 	suggest := registry.SuggestFrom(st, fields, "name")
 	return registry.Resource{
 		Name:    "app",

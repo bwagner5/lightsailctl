@@ -47,15 +47,33 @@ func TestResourceAppDetailView(t *testing.T) {
 
 	assertDetailRow(t, view, "Name", "api")
 	assertDetailRow(t, view, "Region", "us-east-1")
-	assertDetailRow(t, view, "Instance", "box-a")
-	assertDetailRow(t, view, "Health", "● healthy")
-	// Container row uses the compose service name, not the container
-	// name, and lives under its own Services section.
+	// Instance is now the row label (not a separate "Instance:"
+	// row); its value carries the health badge + last-deploy info
+	// so a single line captures the per-instance header. The
+	// label is suffixed with " (instance)" so a reader can tell at
+	// a glance that this row is an instance rather than a service.
+	val := stripAnsi(getRow(view, "box-a (instance)"))
+	if !strings.HasPrefix(val, "● healthy") {
+		t.Errorf("box-a value = %q; want prefix '● healthy'", val)
+	}
+	if !strings.Contains(val, "deployed 5m ago") {
+		t.Errorf("box-a value missing deploy-time: %q", val)
+	}
+	// Service row uses the compose service name, not the container
+	// name. Indent is 2 spaces (nested under instance).
 	assertDetailRow(t, view, "  web", "● running  up 5m ago")
 	// Endpoint is nested under the service (4-space indent).
 	assertDetailRow(t, view, "    Endpoint", "http://203.0.113.10:8080")
-	assertSectionTitle(t, view, "Services (dev)")
-	assertSectionTitle(t, view, "Environment: dev")
+	// Exactly one "Environment: dev" section (no separate
+	// "Services (dev)" heading — that was the regression we're
+	// guarding against).
+	if got := countSections(view, "Environment: dev"); got != 1 {
+		t.Errorf("'Environment: dev' section count = %d; want 1", got)
+	}
+	if got := countSections(view, "Services (dev)"); got != 0 {
+		t.Errorf("legacy 'Services (dev)' section present (count=%d); "+
+			"instance → service hierarchy should live inside the env section", got)
+	}
 }
 
 func TestAppDetailViewShowsUsefulEmptyState(t *testing.T) {
@@ -223,13 +241,149 @@ func TestAppDetailMultiInstance(t *testing.T) {
 			},
 		},
 	})
-	// Both instances should appear as separate sections.
-	instances := collectRows(view, "Instance")
-	if len(instances) != 2 {
-		t.Fatalf("expected 2 Instance rows; got %d: %v", len(instances), instances)
+	// Both instances render as sibling rows (labels) under ONE
+	// "Environment: dev" section — the bug was emitting a duplicate
+	// "Environment: dev" section plus a "Services (dev)" section
+	// per instance, which broke the per-env hierarchy.
+	if got := countSections(view, "Environment: dev"); got != 1 {
+		t.Fatalf("'Environment: dev' section count = %d; want 1", got)
 	}
-	if !contains(instances, "box-1") || !contains(instances, "box-2") {
-		t.Errorf("instances = %v; want box-1 and box-2", instances)
+	if got := countSections(view, "Services (dev)"); got != 0 {
+		t.Errorf("legacy per-instance 'Services (dev)' section should be gone; got %d", got)
+	}
+	if getRow(view, "box-1 (instance)") == "" || getRow(view, "box-2 (instance)") == "" {
+		t.Fatalf("expected both 'box-1 (instance)' and 'box-2 (instance)' as row labels under Environment: dev")
+	}
+	// Each instance's service rows are indented 2 spaces; ensure
+	// both are present (the helpers collect all matches).
+	webRows := collectRows(view, "  web")
+	if len(webRows) != 2 {
+		t.Errorf("expected two '  web' rows (one per instance); got %d: %v", len(webRows), webRows)
+	}
+}
+
+// TestAppDetailMultiInstance_HierarchyOrdering pins the emit order
+// for a multi-target env:
+//
+//	Environment: dev
+//	  box-1      ● healthy  deployed …
+//	    svc1    ● running  up …
+//	      Endpoint  http://…:8080
+//	    svc2    ● running  up …
+//	      Endpoint  http://…:8081
+//	  box-2      ● healthy  deployed …
+//	    svc1    ● running  up …
+//	      Endpoint  http://…:8080
+//	    svc2    ● running  up …
+//	      Endpoint  http://…:8081
+//
+// The previous layout interleaved "Environment:" and "Services:"
+// sections per instance, so the user couldn't visually distinguish
+// which services belonged to which instance. This test locks in the
+// correct per-instance → per-service → per-endpoint order.
+func TestAppDetailMultiInstance_HierarchyOrdering(t *testing.T) {
+	now := time.Now()
+	view := appDetail(App{
+		Name: "api",
+		Envs: "dev",
+		envStatuses: map[string][]lightsail.Status{
+			"dev": {
+				{
+					Instance: "box-1", Status: "healthy",
+					LastDeploy: &lightsail.DeployInfo{Timestamp: now.Add(-10 * time.Minute)},
+					Containers: []lightsail.ContainerStatus{
+						{Service: "svc1", Status: "running", StartedAt: now.Add(-10 * time.Minute),
+							Endpoints: []string{"http://203.0.113.1:8080"}},
+						{Service: "svc2", Status: "running", StartedAt: now.Add(-10 * time.Minute),
+							Endpoints: []string{"http://203.0.113.1:8081"}},
+					},
+				},
+				{
+					Instance: "box-2", Status: "healthy",
+					LastDeploy: &lightsail.DeployInfo{Timestamp: now.Add(-1 * time.Minute)},
+					Containers: []lightsail.ContainerStatus{
+						{Service: "svc1", Status: "running", StartedAt: now.Add(-1 * time.Minute),
+							Endpoints: []string{"http://203.0.113.2:8080"}},
+						{Service: "svc2", Status: "running", StartedAt: now.Add(-1 * time.Minute),
+							Endpoints: []string{"http://203.0.113.2:8081"}},
+					},
+				},
+			},
+		},
+	})
+
+	// Find the Environment: dev section.
+	var sec *registry.DetailSection
+	for i := range view.Sections {
+		if view.Sections[i].Title == "Environment: dev" {
+			sec = &view.Sections[i]
+			break
+		}
+	}
+	if sec == nil {
+		t.Fatal("Environment: dev section missing")
+	}
+
+	// Verify label order encodes the hierarchy. We only check
+	// labels (not values) so timestamp / badge formatting changes
+	// don't make this test brittle. Instance rows carry the
+	// " (instance)" suffix introduced to disambiguate them from
+	// service / endpoint rows at a glance.
+	wantLabels := []string{
+		"box-1 (instance)", "  svc1", "    Endpoint", "  svc2", "    Endpoint",
+		"box-2 (instance)", "  svc1", "    Endpoint", "  svc2", "    Endpoint",
+	}
+	if len(sec.Rows) != len(wantLabels) {
+		t.Fatalf("row count = %d; want %d\ngot rows: %+v",
+			len(sec.Rows), len(wantLabels), sec.Rows)
+	}
+	for i, want := range wantLabels {
+		if sec.Rows[i].Label != want {
+			t.Errorf("row[%d] label = %q; want %q", i, sec.Rows[i].Label, want)
+		}
+	}
+
+	// Spot-check the endpoints to confirm they're attributed to
+	// the right instance (the old bug would mix them up under a
+	// single shared Services section).
+	if v := sec.Rows[2].Value; v != "http://203.0.113.1:8080" {
+		t.Errorf("box-1/svc1 endpoint = %q; want http://203.0.113.1:8080", v)
+	}
+	if v := sec.Rows[7].Value; v != "http://203.0.113.2:8080" {
+		t.Errorf("box-2/svc1 endpoint = %q; want http://203.0.113.2:8080", v)
+	}
+}
+
+// TestAppDetailMultiEnv confirms each distinct env still produces its
+// own section — the fix is "one section per env", not "one section
+// for everything".
+func TestAppDetailMultiEnv(t *testing.T) {
+	now := time.Now()
+	view := appDetail(App{
+		Name: "api",
+		Envs: "dev,prod",
+		envStatuses: map[string][]lightsail.Status{
+			"dev": {{
+				Instance: "box-dev", Status: "healthy",
+				LastDeploy: &lightsail.DeployInfo{Timestamp: now.Add(-5 * time.Minute)},
+				Containers: []lightsail.ContainerStatus{
+					{Service: "web", Status: "running", StartedAt: now.Add(-5 * time.Minute)},
+				},
+			}},
+			"prod": {{
+				Instance: "box-prod", Status: "healthy",
+				LastDeploy: &lightsail.DeployInfo{Timestamp: now.Add(-1 * time.Hour)},
+				Containers: []lightsail.ContainerStatus{
+					{Service: "web", Status: "running", StartedAt: now.Add(-1 * time.Hour)},
+				},
+			}},
+		},
+	})
+	if n := countSections(view, "Environment: dev"); n != 1 {
+		t.Errorf("'Environment: dev' count = %d; want 1", n)
+	}
+	if n := countSections(view, "Environment: prod"); n != 1 {
+		t.Errorf("'Environment: prod' count = %d; want 1", n)
 	}
 }
 
@@ -278,6 +432,19 @@ func assertSectionTitle(t *testing.T, view registry.DetailView, title string) {
 		}
 	}
 	t.Fatalf("section %q not found in %+v", title, view)
+}
+
+// countSections reports how many sections have the given title. Used
+// by regression tests that guard against the multi-instance duplication
+// bug (two "Environment: dev" sections per env).
+func countSections(view registry.DetailView, title string) int {
+	n := 0
+	for _, section := range view.Sections {
+		if section.Title == title {
+			n++
+		}
+	}
+	return n
 }
 
 func getRow(view registry.DetailView, label string) string {
