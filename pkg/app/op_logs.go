@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
+	"time"
 
 	"github.com/bwagner5/triad/pkg/registry"
 
@@ -91,6 +93,17 @@ func logsOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) 
 			cmd.Stdin = os.Stdin
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
+			// Send SIGTERM on ctx cancel so ssh can restore the
+			// local terminal before exiting. Same rationale as
+			// instance ssh; see pkg/instance/op_ssh.go for the
+			// full context.
+			cmd.Cancel = func() error {
+				if cmd.Process == nil {
+					return nil
+				}
+				return cmd.Process.Signal(syscall.SIGTERM)
+			}
+			cmd.WaitDelay = 3 * time.Second
 			return cmd.Run()
 		},
 	}

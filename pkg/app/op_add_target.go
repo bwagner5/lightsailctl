@@ -22,6 +22,12 @@ func addTargetOp(s *store) registry.Operation {
 		Name:  "add-target",
 		Key:   "t",
 		Short: "add an instance as a deployment target",
+		// add-target validates the app exists (env bucket present)
+		// and refuses to run otherwise, so the "t" hint is only
+		// meaningful when there's at least one app to attach to.
+		// The flag also drives TUI wizard pre-fill from the
+		// currently-selected app row.
+		NeedsExistingRow: true,
 		Fields: []registry.Field{
 			{Flag: "name", Short: "n", Label: "App name", Help: "app name",
 				Required: true, Prefill: names.DefaultAppName, Validate: names.ValidateLabel},

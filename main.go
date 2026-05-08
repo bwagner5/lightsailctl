@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"syscall"
 
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/trace"
@@ -57,7 +58,13 @@ func main() {
 // lightsailctl (outside of triad's internal flag-default resolution) that
 // reads env vars — every other layer receives typed values.
 func Run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) error {
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
+	// SIGINT (Ctrl+C) and SIGTERM (default kill) both cancel the
+	// context so wizards, sagas, and child processes can unwind
+	// gracefully — ssh in particular needs to exit cleanly so the
+	// local terminal is restored from raw mode before we return.
+	// Without SIGTERM here, `kill PID` would terminate the process
+	// abruptly and leave bubbletea/ssh state on the terminal.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// shutdown is set by PersistentPreRunE once logging.Init has opened
