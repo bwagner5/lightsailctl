@@ -354,3 +354,43 @@ func TestCreateOp_HiddenFromStatusBar(t *testing.T) {
 		t.Error("create op should still have a Key so it's reachable from '?' help")
 	}
 }
+
+// TestConfirmIAMCreateStep_FastPathWhenPreConfirmed pins the deploy-
+// flow contract: the hidden `iam-confirm` field in deploy op presets
+// Input["iam-confirm"]="true", so the saga step returns nil instead
+// of raising a mid-flight NeedInput. This is the UX fix that keeps
+// the deploy saga running end-to-end after the single upfront
+// deploy-confirm prompt.
+func TestConfirmIAMCreateStep_FastPathWhenPreConfirmed(t *testing.T) {
+	st := &registry.State{
+		Input: registry.Input{"iam-confirm": "true"},
+		Data: map[string]any{
+			"acct":          "111111111111",
+			"iam.role_name": "lightsailctl-deploy-alice-hello-dev",
+			"iam.trust":     "{}",
+			"iam.perm":      "{}",
+		},
+	}
+	err := confirmIAMCreateStep(&store{})(context.Background(), st)
+	if err != nil {
+		t.Fatalf("err = %v; want nil (fast-path on pre-confirmed iam-confirm)", err)
+	}
+}
+
+// TestConfirmIAMCreateStep_FastPathDeclineErrors: a pre-set
+// iam-confirm=false means the user explicitly said no (e.g. via --iam-
+// confirm=false); the step returns an error rather than silently
+// proceeding.
+func TestConfirmIAMCreateStep_FastPathDeclineErrors(t *testing.T) {
+	st := &registry.State{
+		Input: registry.Input{"iam-confirm": "false"},
+		Data:  map[string]any{},
+	}
+	err := confirmIAMCreateStep(&store{})(context.Background(), st)
+	if err == nil {
+		t.Fatal("want error on iam-confirm=false")
+	}
+	if _, ok := err.(*registry.NeedInput); ok {
+		t.Fatalf("got NeedInput; want plain error (decline should abort, not re-prompt)")
+	}
+}

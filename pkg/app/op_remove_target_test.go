@@ -22,14 +22,44 @@ func TestRemoveTargetOpRegistered(t *testing.T) {
 	if op.Name != "remove-target" {
 		t.Errorf("Name = %q; want remove-target", op.Name)
 	}
+	// TUI reachability: remove-target must bind a key and declare
+	// NeedsExistingRow so the "T" hint hides on an empty table but
+	// shows as soon as an app row is selected.
+	if op.Key != "T" {
+		t.Errorf("Key = %q; want T", op.Key)
+	}
+	if !op.NeedsExistingRow {
+		t.Error("NeedsExistingRow = false; want true (remove-target needs a selected app)")
+	}
+	// Enabled is intentionally nil — see the comment on removeTargetOp
+	// about App.Instances being populated by a Field.Async loader
+	// whose result lives in the TUI's side cache, not on the row
+	// struct. The saga validate step provides the "not a target"
+	// error when the user tries to remove an instance that isn't
+	// currently attached.
+	if op.Enabled != nil {
+		t.Error("Enabled != nil; remove-target should rely on NeedsExistingRow + validate step until Enabled can see async-populated columns")
+	}
+	// SortKey clusters remove-target next to add-target in the TUI
+	// status bar and help overlay. Without it, alphabetical sort
+	// splits them across the hint row.
+	if op.SortKey != "add-target-remove" {
+		t.Errorf("SortKey = %q; want \"add-target-remove\" (pairs with add-target)", op.SortKey)
+	}
 	flags := map[string]bool{}
 	for _, f := range op.Fields {
 		flags[f.Flag] = true
 	}
-	for _, want := range []string{"name", "env", "instance", "force"} {
+	for _, want := range []string{"name", "env", "instance"} {
 		if !flags[want] {
 			t.Errorf("missing field %q", want)
 		}
+	}
+	// The "force" flag was dropped: the Confirm prompt is the user's
+	// intent check, and removing the last target is now allowed so
+	// the TUI can reach it without a flag the wizard can't pass.
+	if flags["force"] {
+		t.Errorf("force flag should have been removed")
 	}
 }
 

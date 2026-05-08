@@ -45,19 +45,26 @@ func addTargetOp(s *store) registry.Operation {
 		},
 		Pre: addTargetPre,
 		Steps: []registry.Step{
-			{Label: "Validate app exists", Do: addTargetValidateStep(s)},
-			{Label: "Check instance not already tagged", Do: addTargetCheckDuplicateStep(s)},
-			{Label: "Resolve region from instance", Do: resolveRegionStep(s)},
-			{Label: "Pin region", Do: pinRegionStep(s), Undo: unpinStoreStep(s)},
-			{Label: "Resolve agent binary", Do: resolveAgentStep},
-			{Label: "Tag target instance", Do: tagInstanceStep(s), Undo: untagInstanceUndo(s)},
-			{Label: "Grant instance bucket access", Do: grantAccessStep(s), Undo: revokeAccessUndo(s)},
-			{Label: "SCP agent binary to instance", Do: scpAgentStep(s)},
-			{Label: "Install watcher on instance", Do: remoteInstallStep(s)},
-			{Label: "Start watcher", Do: remoteUpStep(s)},
-			{Label: "Open firewall ports", Do: addTargetFirewallStep(s)},
-			{Label: "Update lightsail.conf", Do: addTargetSaveConfStep},
-			{Label: "Restore global view", Do: unpinStoreStep(s)},
+			// ── Validating ───────────────────────────────────────
+			{Category: "Validating", Label: "Validate app exists", Do: addTargetValidateStep(s)},
+			{Category: "Validating", Label: "Check instance not already tagged", Do: addTargetCheckDuplicateStep(s)},
+
+			// ── Preparing instance ───────────────────────────────
+			// Region lookup + pin are plumbing that belongs with the
+			// provisioning work they enable.
+			{Category: "Preparing instance", Label: "Resolve region from instance", Do: resolveRegionStep(s)},
+			{Category: "Preparing instance", Label: "Pin region", Do: pinRegionStep(s), Undo: unpinStoreStep(s)},
+			{Category: "Preparing instance", Label: "Resolve agent binary", Do: resolveAgentStep},
+			{Category: "Preparing instance", Label: "Tag target instance", Do: tagInstanceStep(s), Undo: untagInstanceUndo(s)},
+			{Category: "Preparing instance", Label: "Grant instance bucket access", Do: grantAccessStep(s), Undo: revokeAccessUndo(s)},
+			{Category: "Preparing instance", Label: "SCP agent binary to instance", Do: scpAgentStep(s)},
+			{Category: "Preparing instance", Label: "Install watcher on instance", Do: remoteInstallStep(s)},
+			{Category: "Preparing instance", Label: "Start watcher", Do: remoteUpStep(s)},
+			{Category: "Preparing instance", Label: "Open firewall ports", Do: addTargetFirewallStep(s)},
+
+			// ── Finalizing ───────────────────────────────────────
+			{Category: "Finalizing", Label: "Update lightsail.conf", Do: addTargetSaveConfStep},
+			{Category: "Finalizing", Label: "Restore global view", Do: unpinStoreStep(s)},
 		},
 	}
 }

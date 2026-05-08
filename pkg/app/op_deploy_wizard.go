@@ -7,6 +7,7 @@ import (
 
 	"github.com/bwagner5/triad/pkg/registry"
 
+	"github.com/aws/lightsailctl/pkg/iamoidc"
 	"github.com/aws/lightsailctl/pkg/instance"
 )
 
@@ -97,6 +98,44 @@ func deploySummaryPreamble(in registry.Input) string {
 		writePreambleSection(&b, "Lightsail Instance (existing)", [][2]string{
 			{"Name", v},
 		})
+	}
+
+	// GitHub Actions setup — only when this is a first-time deploy
+	// of a GitHub-hosted repo AND the user opted in at the offer
+	// prompt. Surfaces what IAM role will be created and what it
+	// can do, in plain English, so the user approves it here
+	// instead of being interrupted mid-saga by a second confirm.
+	// The full trust + permissions JSON is emitted by the saga's
+	// "Build IAM policies" step (st.Output), so it's still visible
+	// post-approval.
+	if asBool(in.Get("offer-gh-action")) {
+		owner := in.Get("__gh-owner")
+		repo := in.Get("__gh-repo")
+		repoSlug := strings.TrimSpace(owner + "/" + repo)
+		if repoSlug == "/" {
+			repoSlug = in.Get("repo")
+		}
+		app := in.Get("name")
+		env := in.Get("env")
+		roleName := ""
+		if owner != "" && repo != "" && env != "" {
+			roleName = iamoidc.DefaultRoleName(owner, repo, env)
+		}
+		rows := [][2]string{
+			{"Repository", repoSlug},
+			{"IAM role", roleName},
+		}
+		if app != "" && env != "" {
+			rows = append(rows, [2]string{
+				"Role grants",
+				fmt.Sprintf("deploy to %s/%s only (upload assets, tag instances, manage firewall)", app, env),
+			})
+		}
+		rows = append(rows, [2]string{
+			"Trust",
+			fmt.Sprintf("limited to GitHub Actions runs from %s", repoSlug),
+		})
+		writePreambleSection(&b, "GitHub Actions setup", rows)
 	}
 	return b.String()
 }

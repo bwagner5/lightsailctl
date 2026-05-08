@@ -16,11 +16,34 @@ import (
 // removeTargetOp implements `lightsailctl app remove-target`. It detaches
 // an instance from an app/env: stops the watcher, untags, revokes bucket
 // access, resets firewall if unused, and updates lightsail.conf.
+//
+// The initial target set up by `app create` / `app deploy` is no different
+// from one added later via `app add-target` — any of them can be removed.
+// Removing the last target leaves the app's infrastructure (env bucket)
+// in place; attach a new target with `app add-target` or tear the app
+// down entirely with `app delete`.
+//
+// Note: we do NOT set an Enabled predicate today. The natural one ("hide
+// when the selected app has no targets") would read App.Instances, but
+// that column is populated by a Field.Async loader in the TUI list
+// view — the async result lands in a side cache, not on the App struct
+// passed to Enabled. Wiring Enabled into that cache is a triad-level
+// change. For now the hint shows on every selected app and the saga's
+// Validate step gives a clear error if the chosen instance isn't a
+// target. NeedsExistingRow still hides the hint when the table is empty.
 func removeTargetOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
 	return registry.Operation{
-		Name:    "remove-target",
-		Short:   "remove an instance from deployment targets",
-		Confirm: "Remove this instance from the deployment targets?",
+		Name:             "remove-target",
+		Key:              "T",
+		Short:            "remove an instance from deployment targets",
+		Confirm:          "Remove this instance from the deployment targets?",
+		NeedsExistingRow: true,
+		// Cluster next to add-target in the TUI status bar and help
+		// overlay. Without SortKey the ops would sort alphabetically
+		// as add-target (a-) and remove-target (r-), splitting them
+		// across the hint row. "add-target-remove" sorts immediately
+		// after "add-target" regardless of what other ops exist.
+		SortKey: "add-target-remove",
 		Fields: []registry.Field{
 			{Flag: "name", Short: "n", Label: "App name", Help: "app name",
 				Required: true, Suggest: suggest, Prefill: names.DefaultAppName},
@@ -29,23 +52,23 @@ func removeTargetOp(s *store, suggest func(context.Context) ([]registry.Choice, 
 			{Flag: "instance", Short: "i", Label: "Instance to remove",
 				Help: "target instance to detach", Required: true,
 				Suggest: instanceSuggest(s)},
-			{Flag: "force", Help: "allow removing the last target",
-				Kind: registry.KindBool, Default: "false",
-				Wizard: registry.BoolPtr(false)},
 			{Flag: "region", Help: "AWS region (auto-filled)",
 				Wizard: registry.BoolPtr(false)},
 		},
 		Pre: removeTargetPre,
 		Steps: []registry.Step{
-			{Label: "Validate target exists", Do: removeTargetValidateStep(s)},
-			{Label: "Resolve region", Do: resolveRegionStep(s)},
-			{Label: "Pin region", Do: pinRegionStep(s), Undo: unpinStoreStep(s)},
-			{Label: "Stop remote services", Do: removeTargetDownStep(s)},
-			{Label: "Untag instance", Do: removeTargetUntagStep(s)},
-			{Label: "Revoke bucket access", Do: removeTargetRevokeStep(s)},
-			{Label: "Reset firewall if unused", Do: removeTargetResetFWStep(s)},
-			{Label: "Update lightsail.conf", Do: removeTargetSaveConfStep},
-			{Label: "Restore global view", Do: unpinStoreStep(s)},
+			// ── Removing target ──────────────────────────────────
+			{Category: "Removing target", Label: "Validate target exists", Do: removeTargetValidateStep(s)},
+			{Category: "Removing target", Label: "Resolve region", Do: resolveRegionStep(s)},
+			{Category: "Removing target", Label: "Pin region", Do: pinRegionStep(s), Undo: unpinStoreStep(s)},
+			{Category: "Removing target", Label: "Stop remote services", Do: removeTargetDownStep(s)},
+			{Category: "Removing target", Label: "Untag instance", Do: removeTargetUntagStep(s)},
+			{Category: "Removing target", Label: "Revoke bucket access", Do: removeTargetRevokeStep(s)},
+			{Category: "Removing target", Label: "Reset firewall if unused", Do: removeTargetResetFWStep(s)},
+
+			// ── Finalizing ───────────────────────────────────────
+			{Category: "Finalizing", Label: "Update lightsail.conf", Do: removeTargetSaveConfStep},
+			{Category: "Finalizing", Label: "Restore global view", Do: unpinStoreStep(s)},
 		},
 	}
 }
@@ -55,7 +78,9 @@ func removeTargetPre(_ context.Context, in registry.Input) error {
 }
 
 // removeTargetValidateStep confirms the instance is actually tagged for this
-// app/env and refuses to remove the last target unless --force is set.
+// app/env. Removing the last target is allowed — the operation's Confirm
+// prompt is the user's intent check, and the app's infrastructure stays
+// in place so a new target can be attached via `app add-target`.
 func removeTargetValidateStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
 		c, err := s.ensure(ctx)
@@ -77,11 +102,6 @@ func removeTargetValidateStep(s *store) func(context.Context, *registry.State) e
 		if !found {
 			return fmt.Errorf("instance %q is not a target for %s/%s",
 				instance, st.Input.Get("name"), st.Input.Get("env"))
-		}
-		force, _ := st.Input.Bool("force")
-		if len(targets) == 1 && !force {
-			return fmt.Errorf("refusing to remove the last target for %s/%s; use --force to override or 'app delete' to tear down the app",
-				st.Input.Get("name"), st.Input.Get("env"))
 		}
 		return nil
 	}

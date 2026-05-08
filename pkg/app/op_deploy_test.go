@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -223,5 +224,113 @@ func TestDeploySummaryPreamble_UseExisting(t *testing.T) {
 	// And must not show __ni/ blueprint stuff.
 	if strings.Contains(got, "Blueprint") {
 		t.Errorf("preamble leaks new-instance fields for use-existing:\n%s", got)
+	}
+}
+
+// TestDeployOp_HasIamConfirmFastPath pins the fix for the mid-saga
+// pause: the deploy op declares a hidden `iam-confirm` field with
+// Default="true". That makes confirmIAMCreateStep's early-return
+// fast-path fire (it checks for a non-empty Input value), so the saga
+// never raises a NeedInput for IAM review during a deploy. Standalone
+// `app enable-gh-action` doesn't set this field, so its preview prompt
+// still runs.
+func TestDeployOp_HasIamConfirmFastPath(t *testing.T) {
+	op := deployOp(&store{})
+	f := fieldByFlag(t, op.Fields, "iam-confirm")
+	if f.Kind != registry.KindBool {
+		t.Errorf("iam-confirm kind = %v; want %v", f.Kind, registry.KindBool)
+	}
+	if f.Default != "true" {
+		t.Errorf("iam-confirm default = %v; want \"true\"", f.Default)
+	}
+	// Must not be prompted — the deploy-confirm preamble is the
+	// user-facing review for the IAM setup.
+	if f.Wizard == nil || *f.Wizard {
+		t.Errorf("iam-confirm must set Wizard=false; got %v", f.Wizard)
+	}
+}
+
+// TestDeploySummaryPreamble_ShowsGhActionsSection verifies the
+// preamble now describes the IAM setup upfront so the user approves
+// everything at the deploy-confirm gate.
+func TestDeploySummaryPreamble_ShowsGhActionsSection(t *testing.T) {
+	in := registry.Input{
+		"name":            "hello",
+		"env":              "dev",
+		"instance":         "box-1",
+		"offer-gh-action":  "true",
+		"__gh-owner":       "alice",
+		"__gh-repo":        "hello",
+		"repo":             "alice/hello",
+	}
+	got := deploySummaryPreamble(in)
+	for _, want := range []string{
+		"GitHub Actions setup",
+		"alice/hello",
+		"lightsailctl-deploy-alice-hello-dev", // default role name
+		"deploy to hello/dev only",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("preamble missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestDeploySummaryPreamble_OmitsGhActionsWhenOptedOut confirms we
+// don't advertise a setup the user declined.
+func TestDeploySummaryPreamble_OmitsGhActionsWhenOptedOut(t *testing.T) {
+	in := registry.Input{
+		"name":            "hello",
+		"env":              "dev",
+		"instance":         "box-1",
+		"offer-gh-action":  "false",
+		"__gh-owner":       "alice",
+		"__gh-repo":        "hello",
+	}
+	got := deploySummaryPreamble(in)
+	if strings.Contains(got, "GitHub Actions setup") {
+		t.Errorf("preamble leaks CI section when offer-gh-action=false:\n%s", got)
+	}
+}
+
+// TestPredetectGhOffer_StashesRepoDetails guards the Pre-phase
+// contract: when a first-time deploy detects a GitHub remote,
+// predetectGhOffer populates the fields the deploy-confirm preamble
+// reads AND the fields detectRemoteStep uses to fast-path, so the
+// saga never re-parses the remote and the preamble can render
+// without any network calls.
+func TestPredetectGhOffer_StashesRepoDetails(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed; skipping")
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+	// Set up a real git repo with a github.com remote so
+	// ghaction.DetectRemoteURL (which shells out to `git`) finds it.
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"remote", "add", "origin", "https://github.com/alice/hello.git"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	in := registry.Input{}
+	predetectGhOffer(in)
+
+	if in.Get("__first-deploy-with-gh") != "true" {
+		t.Errorf("__first-deploy-with-gh = %q; want true", in.Get("__first-deploy-with-gh"))
+	}
+	if in.Get("__gh-owner") != "alice" {
+		t.Errorf("__gh-owner = %q; want alice", in.Get("__gh-owner"))
+	}
+	if in.Get("__gh-repo") != "hello" {
+		t.Errorf("__gh-repo = %q; want hello", in.Get("__gh-repo"))
+	}
+	if in.Get("repo") != "alice/hello" {
+		t.Errorf("repo = %q; want alice/hello", in.Get("repo"))
 	}
 }

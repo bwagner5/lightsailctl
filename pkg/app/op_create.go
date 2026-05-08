@@ -38,15 +38,38 @@ func createOp(s *store) registry.Operation {
 	)
 	niBpSuggest, niBpValidate := niBlueprintSuggestAndValidate(niStore, &niBpType, &niPlatform)
 
+	// setupTargetOn / setupTargetOff gate every target-related
+	// prompt and saga step. Default is "on" so the guided create
+	// flow stays the same for new users; power users can flip it
+	// off to provision just the app bucket and attach an instance
+	// later via `app add-target`.
+	setupTargetOn := func(in registry.Input) bool {
+		v, _ := in.Bool("setup-target")
+		return v
+	}
+	setupTargetOff := func(in registry.Input) bool {
+		v, _ := in.Bool("setup-target")
+		return !v
+	}
+
 	wantsNew := func(in registry.Input) bool {
+		if !setupTargetOn(in) {
+			return false
+		}
 		v, _ := in.Bool("create-new-instance")
 		return v
 	}
 	wantsExisting := func(in registry.Input) bool {
+		if !setupTargetOn(in) {
+			return false
+		}
 		v, _ := in.Bool("create-new-instance")
 		return !v && in.Get("instance") == ""
 	}
 	askStrategy := func(in registry.Input) bool {
+		if !setupTargetOn(in) {
+			return false
+		}
 		return in.Get("instance") == ""
 	}
 
@@ -64,6 +87,29 @@ func createOp(s *store) registry.Operation {
 				Required: true, Validate: names.ValidateLabel},
 			{Flag: "env", Short: "e", Label: "Environment", Help: "environment", Default: "dev",
 				Required: true, Validate: names.ValidateLabel},
+
+			// ── Deployment target (optional) ─────────────────────
+			// Gates the rest of the target-related prompts. When
+			// "no", create provisions only the env bucket + config
+			// file; users attach an instance later via `app
+			// add-target`. The first target is NOT special — it can
+			// be removed via `app remove-target` just like any
+			// subsequent one.
+			{Flag: "setup-target", Label: "Set up a deployment target now?",
+				Help: "attach an instance as a deployment target; choose 'no' to create just the app infrastructure and add a target later",
+				Kind: registry.KindBool, Required: true, Default: "true",
+				Suggest: yesNoSuggest(
+					"infrastructure only; I'll add a target later with `app add-target`",
+					"walk me through attaching an instance now")},
+
+			// Region picker is only prompted in the infra-only
+			// flow. When a target is being set up, region auto-
+			// fills from the picked/created instance.
+			{Flag: "region", Label: "AWS region",
+				Help: "AWS region for the app bucket",
+				Default: "us-east-1",
+				When:    setupTargetOff,
+				Suggest: niRegionSuggest(niStore)},
 
 			// ── Instance target ──────────────────────────────────
 			{Flag: "create-new-instance", Label: "Target",
@@ -106,27 +152,51 @@ func createOp(s *store) registry.Operation {
 
 			{Flag: "agent-path", Label: "Agent binary",
 				Help: "lightsailctl binary to scp to the instance (linux/amd64)",
-				File: true, When: needsAgentBinaryPrompt},
-			{Flag: "region", Help: "AWS region (auto-filled from --instance)",
-				Wizard: registry.BoolPtr(false)},
+				File: true, When: func(in registry.Input) bool {
+					return setupTargetOn(in) && needsAgentBinaryPrompt(in)
+				}},
 		},
 		Pre: createPreResolveAgent,
 		Steps: []registry.Step{
-			{Label: "Resolve deployment target", Do: applyStrategyStep(s)},
-			{Label: "Create new Lightsail instance",
+			// ── Creating instance ────────────────────────────────
+			// Whole category skips in the infra-only flow.
+			{Category: "Creating instance", Label: "Resolve deployment target",
+				Do: applyStrategyStep(s), Skip: skipIfInfraOnly},
+			{Category: "Creating instance", Label: "Create new Lightsail instance",
 				Do:   createNewInstanceInlineStep(s),
 				Skip: skipUnlessCreatingNewInstance},
-			{Label: "Resolve region from instance", Do: resolveRegionStep(s)},
-			{Label: "Pin region", Do: pinRegionStep(s), Undo: unpinStoreStep(s)},
-			{Label: "Resolve agent binary", Do: resolveAgentStep},
-			{Label: "Create env bucket", Do: createEnvBucketStep(s)},
-			{Label: "Tag target instance", Do: tagInstanceStep(s), Undo: untagInstanceUndo(s)},
-			{Label: "Grant instance bucket access", Do: grantAccessStep(s), Undo: revokeAccessUndo(s)},
-			{Label: "SCP agent binary to instance", Do: scpAgentStep(s)},
-			{Label: "Install watcher on instance", Do: remoteInstallStep(s)},
-			{Label: "Start watcher", Do: remoteUpStep(s)},
-			{Label: "Save lightsail.conf", Do: saveConfigStep},
-			{Label: "Restore global view", Do: unpinStoreStep(s)},
+			{Category: "Creating instance", Label: "Resolve region from instance",
+				Do: resolveRegionStep(s), Skip: skipIfInfraOnly},
+
+			// ── Creating application infrastructure ──────────────
+			// Runs in both flows. Pin region + create the env
+			// bucket. In the infra-only flow, region came from the
+			// wizard; otherwise it came from the picked instance.
+			{Category: "Creating application infrastructure", Label: "Pin region",
+				Do: pinRegionStep(s), Undo: unpinStoreStep(s)},
+			{Category: "Creating application infrastructure", Label: "Create env bucket",
+				Do: createEnvBucketStep(s)},
+
+			// ── Preparing instance ───────────────────────────────
+			// Whole category skips in the infra-only flow. In that
+			// case the user attaches an instance later via
+			// `app add-target`, which runs the equivalent steps.
+			{Category: "Preparing instance", Label: "Resolve agent binary",
+				Do: resolveAgentStep, Skip: skipIfInfraOnly},
+			{Category: "Preparing instance", Label: "Tag target instance",
+				Do: tagInstanceStep(s), Undo: untagInstanceUndo(s), Skip: skipIfInfraOnly},
+			{Category: "Preparing instance", Label: "Grant instance bucket access",
+				Do: grantAccessStep(s), Undo: revokeAccessUndo(s), Skip: skipIfInfraOnly},
+			{Category: "Preparing instance", Label: "SCP agent binary to instance",
+				Do: scpAgentStep(s), Skip: skipIfInfraOnly},
+			{Category: "Preparing instance", Label: "Install watcher on instance",
+				Do: remoteInstallStep(s), Skip: skipIfInfraOnly},
+			{Category: "Preparing instance", Label: "Start watcher",
+				Do: remoteUpStep(s), Skip: skipIfInfraOnly},
+
+			// ── Finalizing ───────────────────────────────────────
+			{Category: "Finalizing", Label: "Save lightsail.conf", Do: saveConfigStep},
+			{Category: "Finalizing", Label: "Restore global view", Do: unpinStoreStep(s)},
 		},
 	}
 }

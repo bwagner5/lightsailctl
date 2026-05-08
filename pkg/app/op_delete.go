@@ -32,16 +32,21 @@ func deleteOp(s *store, suggest func(context.Context) ([]registry.Choice, error)
 			{Flag: "name", Short: "n", Help: "app name", Required: true, Suggest: suggest},
 		},
 		Steps: []registry.Step{
-			{Label: "Discover target instances", Do: discoverTargetsStep(s)},
-			{Label: "Stop remote app services", Do: remoteLocalDownStep(s), Skip: skipIfNoTargets},
-			{Label: "Untag target instances", Do: untagTargetsStep(s), Skip: skipIfNoTargets},
-			{Label: "Reset firewalls on unused instances", Do: resetFirewallsStep(s), Skip: skipIfNoTargets},
-			{Label: "List app buckets", Do: listBucketsForDeleteStep(s)},
-			{Label: "Delete env buckets", Do: deleteEnvBucketsStep(s), Skip: skipIfNoEnvBuckets},
-			{Label: "Discover CI IAM roles", Do: discoverCIRolesStep(s)},
-			{Label: "Delete CI IAM roles", Do: deleteCIRolesStep(s), Skip: skipIfNoCIRoles},
-			{Label: "Remove local GitHub Actions workflow", Do: removeLocalWorkflowStep, Skip: skipIfNoLocalWorkflow},
-			{Label: "Remove local lightsail.conf", Do: removeLocalConfStep, Skip: skipIfNoMatchingLocalConf},
+			// ── Stopping app ─────────────────────────────────────
+			{Category: "Stopping app", Label: "Discover target instances", Do: discoverTargetsStep(s)},
+			{Category: "Stopping app", Label: "Stop remote app services", Do: remoteLocalDownStep(s), Skip: skipIfNoTargets},
+			{Category: "Stopping app", Label: "Untag target instances", Do: untagTargetsStep(s), Skip: skipIfNoTargets},
+			{Category: "Stopping app", Label: "Reset firewalls on unused instances", Do: resetFirewallsStep(s), Skip: skipIfNoTargets},
+
+			// ── Deleting infrastructure ──────────────────────────
+			{Category: "Deleting infrastructure", Label: "List app buckets", Do: listBucketsForDeleteStep(s)},
+			{Category: "Deleting infrastructure", Label: "Delete env buckets", Do: deleteEnvBucketsStep(s), Skip: skipIfNoEnvBuckets},
+			{Category: "Deleting infrastructure", Label: "Discover CI IAM roles", Do: discoverCIRolesStep(s)},
+			{Category: "Deleting infrastructure", Label: "Delete CI IAM roles", Do: deleteCIRolesStep(s), Skip: skipIfNoCIRoles},
+
+			// ── Cleaning up locally ──────────────────────────────
+			{Category: "Cleaning up locally", Label: "Remove local GitHub Actions workflow", Do: removeLocalWorkflowStep, Skip: skipIfNoLocalWorkflow},
+			{Category: "Cleaning up locally", Label: "Remove local lightsail.conf", Do: removeLocalConfStep, Skip: skipIfNoMatchingLocalConf},
 		},
 	}
 }

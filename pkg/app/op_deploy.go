@@ -183,10 +183,26 @@ func deployOp(s *store) registry.Operation {
 				Kind: registry.KindDuration, Wizard: registry.BoolPtr(false)},
 			{Flag: "no-wait", Help: "upload and exit without waiting for health", Default: "false",
 				Kind: registry.KindBool, Wizard: registry.BoolPtr(false)},
+			// Auto-confirm the IAM role creation when opted into CI
+			// at the upfront offer-gh-action prompt. deploy already
+			// shows the GitHub Actions setup plan in the deploy-
+			// confirm preamble, so a second mid-saga prompt would
+			// just split the live progress view without adding
+			// value. On a standalone `app enable-gh-action` run,
+			// this flag is not set and the policy preview still
+			// fires — that op's only user-facing gate.
+			{Flag: "iam-confirm",
+				Help:    "auto-confirmed in the deploy review; the mid-saga IAM preview is suppressed",
+				Default: "true",
+				Kind:    registry.KindBool, Wizard: registry.BoolPtr(false)},
 		},
 		Pre: deployPre,
 		Steps: []registry.Step{
-			{Label: "Inspect lightsail.conf", Do: func(ctx context.Context, st *registry.State) error {
+			// ── Checking your setup ──────────────────────────────
+			// Pre-mutation inspection + the user's confirm gate.
+			// Nothing here touches AWS or the filesystem; a decline
+			// short-circuits everything below.
+			{Category: "Checking your setup", Label: "Inspect lightsail.conf", Do: func(ctx context.Context, st *registry.State) error {
 				// Announce app to table (housekeeping).
 				_ = announceEarlyStep(s)(ctx, st)
 				// Detect conf.
@@ -195,63 +211,80 @@ func deployOp(s *store) registry.Operation {
 			// Configuration phase: translate up-front wizard answers
 			// into saga state. Pure: sets st.Data["strategy"], no
 			// AWS calls, no mutations.
-			{Label: "Resolve deployment target", Do: applyStrategyStep(s)},
+			{Category: "Checking your setup", Label: "Resolve deployment target", Do: applyStrategyStep(s)},
 			// Check the review-confirm answer FIRST, before any
 			// mutating work (instance create, bucket create, ...).
 			// Decline short-circuits via st.Data["aborted"]; all
 			// downstream steps see skipIfAborted.
-			{Label: "Confirm deploy plan", Do: abortIfDeclinedStep},
-			{Label: "Create new Lightsail instance",
+			{Category: "Checking your setup", Label: "Confirm deploy plan", Do: abortIfDeclinedStep},
+
+			// ── Creating instance ────────────────────────────────
+			// Single step; the whole category skips when the user
+			// picked an existing instance.
+			{Category: "Creating instance", Label: "Create new Lightsail instance",
 				Do:   createNewInstanceInlineStep(s),
 				Skip: skipUnlessCreatingNewInstanceOrAborted},
-			{Label: "Resolve region from instance", Do: resolveRegionFromInstanceStep(s),
+
+			// ── Creating application infrastructure ──────────────
+			// App-scoped cloud resources: region lookup, conf file,
+			// app existence check, env bucket. On re-deploy, "Check
+			// app exists" short-circuits and the rest skip.
+			{Category: "Creating application infrastructure", Label: "Resolve region from instance", Do: resolveRegionFromInstanceStep(s),
 				Skip: skipIfRegionSetOrAborted, Undo: unpinStoreStep(s)},
-			{Label: "Save lightsail.conf", Do: saveConfigStep, Skip: skipIfConfDetected},
-			{Label: "Check app exists (create if missing)", Do: ensureAppStep(s),
+			{Category: "Creating application infrastructure", Label: "Save lightsail.conf", Do: saveConfigStep, Skip: skipIfConfDetected},
+			{Category: "Creating application infrastructure", Label: "Check app exists (create if missing)", Do: ensureAppStep(s),
 				Skip: skipIfAborted, Undo: unpinStoreStep(s)},
-			{Label: "Resolve agent binary", Do: resolveAgentStep, Skip: skipIfAbortedOrAppExists},
-			{Label: "Create env bucket", Do: createEnvBucketStep(s), Skip: skipIfAbortedOrAppExists},
-			{Label: "Tag target instance", Do: tagInstanceStep(s), Skip: skipIfAbortedOrAppExists},
-			{Label: "Grant instance bucket access", Do: grantAccessStep(s), Skip: skipIfAbortedOrAppExists},
-			{Label: "Copy agent binary to instance", Do: scpAgentStep(s), Skip: skipIfAbortedOrAppExists},
-			{Label: "Install agent on instance", Do: remoteInstallStep(s), Skip: skipIfAbortedOrAppExists},
-			{Label: "Start agent on instance", Do: remoteUpStep(s), Skip: skipIfAbortedOrAppExists},
-			// ── GitHub Actions CI setup (first-run only) ─────────
-			// Runs after supporting infra is ready but before the
-			// actual deploy. If something fails in deploy, all
-			// supporting infra (including IAM/workflow) is already
-			// set up for the next attempt.
-			{Label: "Offer GitHub Actions deploy workflow",
+			{Category: "Creating application infrastructure", Label: "Create env bucket", Do: createEnvBucketStep(s), Skip: skipIfAbortedOrAppExists},
+
+			// ── Preparing instance ───────────────────────────────
+			// Instance-scoped setup: put the watcher agent on the
+			// box and wire up bucket access. First-deploy only; all
+			// skip on re-deploy.
+			{Category: "Preparing instance", Label: "Resolve agent binary", Do: resolveAgentStep, Skip: skipIfAbortedOrAppExists},
+			{Category: "Preparing instance", Label: "Tag target instance", Do: tagInstanceStep(s), Skip: skipIfAbortedOrAppExists},
+			{Category: "Preparing instance", Label: "Grant instance bucket access", Do: grantAccessStep(s), Skip: skipIfAbortedOrAppExists},
+			{Category: "Preparing instance", Label: "Copy agent binary to instance", Do: scpAgentStep(s), Skip: skipIfAbortedOrAppExists},
+			{Category: "Preparing instance", Label: "Install agent on instance", Do: remoteInstallStep(s), Skip: skipIfAbortedOrAppExists},
+			{Category: "Preparing instance", Label: "Start agent on instance", Do: remoteUpStep(s), Skip: skipIfAbortedOrAppExists},
+
+			// ── Setting up GitHub Actions ────────────────────────
+			// First-run only; runs after supporting infra is ready
+			// but before the actual deploy. If something fails in
+			// deploy, the CI setup is already done and survives.
+			{Category: "Setting up GitHub Actions", Label: "Offer GitHub Actions deploy workflow",
 				Do:   offerGhActionChoiceStep,
 				Skip: skipOfferGhActionWithAbort(s)},
-			{Label: "Detect GitHub remote", Do: detectRemoteStep,
+			{Category: "Setting up GitHub Actions", Label: "Detect GitHub remote", Do: detectRemoteStep,
 				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
-			{Label: "Resolve GitHub token", Do: resolveGhTokenStep,
+			{Category: "Setting up GitHub Actions", Label: "Resolve GitHub token", Do: resolveGhTokenStep,
 				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
-			{Label: "Fetch repo metadata", Do: fetchRepoStep,
+			{Category: "Setting up GitHub Actions", Label: "Fetch repo metadata", Do: fetchRepoStep,
 				Skip: skipCIOrAborted(skipCIFetchRepo)},
-			{Label: "Build IAM policies", Do: buildPoliciesStep(s),
+			{Category: "Setting up GitHub Actions", Label: "Build IAM policies", Do: buildPoliciesStep(s),
 				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
-			{Label: "Confirm IAM role creation", Do: confirmIAMCreateStep(s),
+			{Category: "Setting up GitHub Actions", Label: "Confirm IAM role creation", Do: confirmIAMCreateStep(s),
 				Skip: skipCIOrAborted(skipCIConfirmIAM(s))},
-			{Label: "Ensure OIDC provider", Do: ensureProviderStep(s),
+			{Category: "Setting up GitHub Actions", Label: "Ensure OIDC provider", Do: ensureProviderStep(s),
 				Skip: skipCIOrAborted(skipCIProvisionIAM)},
-			{Label: "Create IAM role", Do: ensureRoleStep(s),
+			{Category: "Setting up GitHub Actions", Label: "Create IAM role", Do: ensureRoleStep(s),
 				Skip: skipCIOrAborted(skipCIProvisionIAM)},
-			{Label: "Write workflow file", Do: writeWorkflowStep,
+			{Category: "Setting up GitHub Actions", Label: "Write workflow file", Do: writeWorkflowStep,
 				Skip: skipCIOrAborted(skipCIWriteWorkflow)},
-			{Label: "GitHub Actions setup complete", Do: enableSummaryStep,
+			{Category: "Setting up GitHub Actions", Label: "GitHub Actions setup complete", Do: enableSummaryStep,
 				Skip: skipCIOrAborted(skipUnlessOptedIntoCI)},
-			// ── Actual deploy (last) ─────────────────────────────
-			{Label: "Package source", Do: packageStep, Skip: skipIfAborted, Undo: packageUndo},
-			{Label: "Acquire bucket key", Do: acquireKeyStep(s), Skip: skipIfAborted, Undo: acquireKeyUndo},
-			{Label: "Upload deploy asset", Do: uploadStep, Skip: skipIfAborted},
-			{Label: "Open firewall ports", Do: firewallStep(s), Skip: skipIfAborted},
-			{Label: "Release bucket key", Do: releaseKeyStep, Skip: skipIfAborted},
-			{Label: "Wait for healthy", Do: func(ctx context.Context, st *registry.State) error {
+
+			// ── Deploying your app ───────────────────────────────
+			// The actual ship-the-code phase: package, upload, wait
+			// for healthy. This is what users came here for.
+			{Category: "Deploying your app", Label: "Package source", Do: packageStep, Skip: skipIfAborted, Undo: packageUndo},
+			{Category: "Deploying your app", Label: "Acquire bucket key", Do: acquireKeyStep(s), Skip: skipIfAborted, Undo: acquireKeyUndo},
+			{Category: "Deploying your app", Label: "Upload deploy asset", Do: uploadStep, Skip: skipIfAborted},
+			{Category: "Deploying your app", Label: "Open firewall ports", Do: firewallStep(s), Skip: skipIfAborted},
+			{Category: "Deploying your app", Label: "Release bucket key", Do: releaseKeyStep, Skip: skipIfAborted},
+			{Category: "Deploying your app", Label: "Wait for healthy", Do: func(ctx context.Context, st *registry.State) error {
 				return waitStep(s)(ctx, st)
 			}, Skip: skipIfAbortedOrNoWait},
-			{Label: "Finalize", Do: func(ctx context.Context, st *registry.State) error {
+			{Category: "Deploying your app", Label: "Finalize", Do: func(ctx context.Context, st *registry.State) error {
 				// Collect endpoints BEFORE unpinning the region — the
 				// region-pinned client is needed for S3ClientFor.
 				if c, cerr := s.ensure(ctx); cerr == nil {
@@ -318,6 +351,17 @@ func skipUnlessCreatingNewInstance(st *registry.State) bool {
 	return strategy != "create-new"
 }
 
+// skipIfInfraOnly is the step Skip predicate that short-circuits
+// every target-related saga step when the user chose to create only
+// the app's infrastructure (setup-target=false). The whole
+// "Creating instance" and "Preparing instance" categories collapse
+// to "(all skipped)" in that mode; the user attaches an instance
+// later via `app add-target`.
+func skipIfInfraOnly(st *registry.State) bool {
+	v, _ := st.Input.Bool("setup-target")
+	return !v
+}
+
 // yesNoSuggest returns a Suggest that offers exactly two choices.
 // The returned values are "false" (no) and "true" (yes). The
 // descriptions should NOT repeat "Yes"/"No" — the helper adds a
@@ -357,7 +401,11 @@ func deployPre(ctx context.Context, in registry.Input) error {
 
 // predetectGhOffer sets __first-deploy-with-gh=true in Input when this
 // is a first-time deploy (no lightsail.conf) of a GitHub-hosted repo.
-// The wizard's offer-gh-action field uses this as its When predicate.
+// It also stashes the parsed owner/repo so the deploy-confirm preamble
+// can describe the GitHub Actions setup upfront and the saga's
+// detectRemoteStep fast-paths instead of re-parsing the remote. The
+// wizard's offer-gh-action field uses __first-deploy-with-gh as its
+// When predicate.
 func predetectGhOffer(in registry.Input) {
 	cfg, _ := config.LoadFromCwd()
 	if cfg != nil {
@@ -371,10 +419,23 @@ func predetectGhOffer(in registry.Input) {
 	if raw == "" {
 		return
 	}
-	if _, perr := ghaction.ParseRemoteURL(raw); perr != nil {
+	ref, perr := ghaction.ParseRemoteURL(raw)
+	if perr != nil {
 		return
 	}
 	in["__first-deploy-with-gh"] = "true"
+	// Stash the parsed owner/repo so:
+	//   1. deploySummaryPreamble can render the GitHub Actions
+	//      section without any network calls.
+	//   2. detectRemoteStep's "repo already set" fast-path skips the
+	//      re-parse during the saga (same parse cost, but it also
+	//      means the wizard can offer a clean --repo override if we
+	//      ever surface it in the UI).
+	in["__gh-owner"] = ref.Owner
+	in["__gh-repo"] = ref.Repo
+	if in.Get("repo") == "" {
+		in["repo"] = ref.String()
+	}
 }
 
 // preresolveAgentBinary best-effort fills Input["agent-path"] from

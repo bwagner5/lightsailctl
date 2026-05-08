@@ -71,14 +71,19 @@ func enableGhActionOp(s *store, suggest func(context.Context) ([]registry.Choice
 		},
 		Pre: preloadGhActionFromConf,
 		Steps: []registry.Step{
-			{Label: "Detect git remote", Do: detectRemoteStep},
-			{Label: "Resolve GitHub token", Do: resolveGhTokenStep},
-			{Label: "Fetch repo metadata", Do: fetchRepoStep, Skip: skipIfDetachedFromGitHub},
-			{Label: "Build IAM policies", Do: buildPoliciesStep(s)},
-			{Label: "Ensure OIDC provider", Do: ensureProviderStep(s), Skip: skipRoleProvisioning},
-			{Label: "Ensure role + inline policy", Do: ensureRoleStep(s), Skip: skipRoleProvisioning},
-			{Label: "Write workflow file", Do: writeWorkflowStep, Skip: skipIfSkipWorkflow},
-			{Label: "Summary", Do: enableSummaryStep},
+			// ── Discovering repository ───────────────────────────
+			{Category: "Discovering repository", Label: "Detect git remote", Do: detectRemoteStep},
+			{Category: "Discovering repository", Label: "Resolve GitHub token", Do: resolveGhTokenStep},
+			{Category: "Discovering repository", Label: "Fetch repo metadata", Do: fetchRepoStep, Skip: skipIfDetachedFromGitHub},
+
+			// ── Setting up AWS permissions ───────────────────────
+			{Category: "Setting up AWS permissions", Label: "Build IAM policies", Do: buildPoliciesStep(s)},
+			{Category: "Setting up AWS permissions", Label: "Ensure OIDC provider", Do: ensureProviderStep(s), Skip: skipRoleProvisioning},
+			{Category: "Setting up AWS permissions", Label: "Ensure role + inline policy", Do: ensureRoleStep(s), Skip: skipRoleProvisioning},
+
+			// ── Adding workflow to repo ──────────────────────────
+			{Category: "Adding workflow to repo", Label: "Write workflow file", Do: writeWorkflowStep, Skip: skipIfSkipWorkflow},
+			{Category: "Adding workflow to repo", Label: "Summary", Do: enableSummaryStep},
 		},
 	}
 }
