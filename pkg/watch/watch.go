@@ -321,8 +321,41 @@ func setPhase(p *phaseState, phase string) {
 // signature stays small.
 type pushPhaseFunc func(name string)
 
+// pullAndApply orchestrates a single deploy. It's split into three
+// named phases so the agent never takes the live stack down before
+// the new one is ready:
+//
+//  1. downloadAndExtract — pulls the tarball from S3 into a fresh
+//     staging dir. If this fails the existing `current/` is
+//     untouched. Phase: downloading → extracting.
+//  2. buildAndStage — strategy-specific. For compose, this is just
+//     detection (compose's own build runs inline during `up
+//     --build` in step 3). For Dockerfile/buildpack (Tasks 6/7) it
+//     runs `docker build` / `pack build` and synthesizes a compose
+//     file inside staging. Failures here also leave `current/`
+//     intact. Phase: detecting → building.
+//  3. swap — only now does the previous stack go down. Renames
+//     staging → current and runs `compose up`. The brief
+//     port-bind window between down and up is unavoidable without
+//     a reverse proxy. Phase: starting.
+//
+// The strategy returned by buildAndStage is consumed by swap so the
+// two callers don't run Detect twice on the same tree.
 func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket, key, baseDir, currentDir string, pushPhase pushPhaseFunc) error {
-	// Step 1: Download the deploy asset from S3.
+	staging := filepath.Join(baseDir, "staging")
+	if err := downloadAndExtract(ctx, log, svc, bucket, key, baseDir, staging, pushPhase); err != nil {
+		return err
+	}
+	strategy, err := buildAndStage(ctx, log, staging, pushPhase)
+	if err != nil {
+		return err
+	}
+	return swap(ctx, log, staging, currentDir, strategy, pushPhase)
+}
+
+// downloadAndExtract is phase 1: pull + unpack into a fresh
+// staging dir. The previous deploy's `current/` is unaffected.
+func downloadAndExtract(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket, key, baseDir, staging string, pushPhase pushPhaseFunc) error {
 	pushPhase("downloading")
 	log.InfoContext(ctx, "downloading deploy asset",
 		slog.String("bucket", bucket), slog.String("key", key))
@@ -335,7 +368,6 @@ func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket,
 	}
 	defer func() { _ = out.Body.Close() }()
 
-	staging := filepath.Join(baseDir, "staging")
 	_ = os.RemoveAll(staging)
 	if err := os.MkdirAll(staging, 0o755); err != nil {
 		return fmt.Errorf("create staging dir: %w", err)
@@ -356,13 +388,11 @@ func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket,
 		slog.Int64("bytes", n),
 		slog.Duration("elapsed", time.Since(dlStart)))
 
-	// Step 2: Extract the tarball.
 	pushPhase("extracting")
 	log.InfoContext(ctx, "extracting tarball", slog.String("dest", staging))
 	if err := runCmd(ctx, log, "", "tar", "xzf", tmp, "-C", staging); err != nil {
 		return fmt.Errorf("extract: %w", err)
 	}
-	// Log what was extracted.
 	if entries, rerr := os.ReadDir(staging); rerr == nil {
 		names := make([]string, 0, len(entries))
 		for _, e := range entries {
@@ -372,31 +402,45 @@ func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket,
 			slog.Int("count", len(names)),
 			slog.String("files", strings.Join(names, ", ")))
 	}
+	return nil
+}
 
-	// Step 2b: Detect what we're deploying. Same Detect() the client
-	// ran pre-upload, so the answer can't disagree across the wire.
-	// The agent's call is the authoritative one — even if a future
-	// client version forgot to detect, the agent still picks the
-	// right build path. Until non-compose strategies are wired up
-	// (Tasks 6/7), only compose actually proceeds; everything else
-	// fails fast here so the live service isn't taken down by an
-	// unimplemented build path.
+// buildAndStage is phase 2: strategy detection + (for non-compose
+// strategies) the actual `docker build` / `pack build`. For compose
+// it's a near-no-op since `compose up --build` does the work
+// inline. Until Tasks 6/7 land, non-compose strategies fail fast
+// here so the live stack is preserved.
+func buildAndStage(ctx context.Context, log *slog.Logger, staging string, pushPhase pushPhaseFunc) (build.Strategy, error) {
 	pushPhase("detecting")
 	strategy, reason, derr := build.Detect(staging)
 	if derr != nil {
-		return fmt.Errorf("detect strategy: %w", derr)
+		return build.StrategyUnknown, fmt.Errorf("detect strategy: %w", derr)
 	}
 	log.InfoContext(ctx, "detected build strategy",
 		slog.String("strategy", strategy.String()),
 		slog.String("reason", reason))
-	if strategy != build.StrategyCompose {
-		return fmt.Errorf(
+	switch strategy {
+	case build.StrategyCompose:
+		// compose's own up --build runs the build inline during swap.
+		return strategy, nil
+	default:
+		return strategy, fmt.Errorf(
 			"build strategy %q (%s) is recognized but not yet implemented in the agent — "+
 				"this watcher only supports compose deploys for now",
 			strategy.String(), reason)
 	}
+}
 
-	// Step 3: Stop the old deployment.
+// swap is phase 3: stop the old stack, atomically replace
+// `current/` with the new staging tree, and start the new stack.
+// This is the only phase that takes the live service down, and it
+// only runs after build succeeds.
+func swap(ctx context.Context, log *slog.Logger, staging, currentDir string, strategy build.Strategy, pushPhase pushPhaseFunc) error {
+	pushPhase("starting")
+
+	// Stop the old deployment AFTER staging is ready and the new
+	// build has succeeded. Failures earlier in the pipeline now
+	// leave the old stack running.
 	if cf := findCompose(currentDir); cf != "" {
 		log.InfoContext(ctx, "stopping previous deployment",
 			slog.String("compose_file", cf))
@@ -408,7 +452,6 @@ func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket,
 		log.InfoContext(ctx, "no previous deployment to stop")
 	}
 
-	// Step 4: Swap staging → current.
 	_ = os.RemoveAll(currentDir)
 	if err := os.Rename(staging, currentDir); err != nil {
 		return fmt.Errorf("swap staging to current: %w", err)
@@ -416,21 +459,25 @@ func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket,
 	log.InfoContext(ctx, "swapped staging to current",
 		slog.String("path", currentDir))
 
-	// Step 5: Start the new deployment.
-	pushPhase("starting")
 	cf := findCompose(currentDir)
 	if cf == "" {
 		return fmt.Errorf("no compose file found in deployed asset (looked for docker-compose.yml, compose.yml, etc.)")
 	}
+	// `up --build` is right for compose (build inline); for
+	// Dockerfile/buildpack the image is already built and tagged
+	// so plain `up -d` is enough. Strategy distinguishes them.
+	upArgs := []string{"compose", "-f", cf, "up", "-d"}
+	if strategy == build.StrategyCompose {
+		upArgs = []string{"compose", "-f", cf, "up", "--build", "-d"}
+	}
 	log.InfoContext(ctx, "starting new deployment",
 		slog.String("compose_file", cf),
 		slog.String("working_dir", currentDir))
-	if err := runCmd(ctx, log, currentDir, "docker", "compose", "-f", cf, "up", "--build", "-d"); err != nil {
+	if err := runCmd(ctx, log, currentDir, "docker", upArgs...); err != nil {
 		return fmt.Errorf("compose up: %w", err)
 	}
 	log.InfoContext(ctx, "compose up completed, checking container health")
 
-	// Step 6: Log resulting container states.
 	containers, endpoints := containerInfo(currentDir)
 	for _, c := range containers {
 		log.InfoContext(ctx, "container status",
@@ -445,7 +492,6 @@ func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket,
 	if len(containers) == 0 {
 		log.WarnContext(ctx, "no containers running after compose up")
 	}
-
 	return nil
 }
 
