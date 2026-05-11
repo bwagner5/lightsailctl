@@ -145,4 +145,3 @@ func TestSetPhase_NilSafe(t *testing.T) {
 	}()
 	setPhase(nil, "downloading")
 }
-

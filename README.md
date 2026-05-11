@@ -6,8 +6,8 @@ shells out to it).
 
 ## Two faces
 
-**1. First-class CLI** — deploy Docker Compose applications to a Lightsail
-instance with one command:
+**1. First-class CLI** — deploy a source tree (Go, Node, Python, Java, …) or
+a Docker Compose application to a Lightsail instance with one command:
 
 ```sh
 lightsailctl deploy                 # deploy current dir to an app/env
@@ -21,6 +21,44 @@ lightsailctl app --help             # everything else
 
 Every command missing a required flag launches an inline wizard (suppress
 with `-y` for CI).
+
+## Zero-config deploy
+
+`lightsailctl deploy` figures out how to build your project on its own. It
+inspects the working directory and picks one of three strategies:
+
+| What it finds | What happens |
+|---|---|
+| `docker-compose.yml` | `docker compose up --build -d` on the instance |
+| `Dockerfile` | `docker build` on the instance, port from `EXPOSE` (defaults to 8080) |
+| `go.mod` / `package.json` / `requirements.txt` / `pyproject.toml` / `pom.xml` / `build.gradle[.kts]` / `*.csproj` / `Gemfile` / `composer.json` / `index.html` | `pack build` on the instance via Cloud Native Buildpacks (paketo-jammy-base) |
+
+Builds run **on the instance**, not locally. The client tars + uploads
+the source tree; the instance pulls, builds, and deploys. No `pack` /
+Docker Buildx / cross-arch pain on your laptop.
+
+The deploy review screen names the strategy before you confirm:
+
+```
+Build strategy
+  Strategy  Cloud Native Buildpacks (Go via go.mod)
+  Builder   paketobuildpacks/builder-jammy-base
+  Note      no Dockerfile needed — built on the instance
+```
+
+### Caveats
+
+- **OOM on nano/micro.** Buildpack builds need ~1 GB of free memory.
+  Deploys on `nano_*` / `micro_*` bundles may OOM during build; size up
+  or supply a Dockerfile.
+- **Port defaults.** Buildpacks listen on 8080; Dockerfile reads the
+  first `EXPOSE`. If you need a different port, drop a
+  `docker-compose.yml` next to your code — it always wins.
+- **Layer cache.** Successive deploys of the same app reuse a per-app
+  buildpack cache volume (`lightsail-buildpack-cache-<app>-<env>`) so
+  the second deploy lands in seconds. Wipe it manually with
+  `docker volume rm lightsail-buildpack-cache-<app>-<env>` if you need
+  a clean rebuild.
 
 **2. AWS-CLI plugin** — invoked automatically by the AWS CLI:
 
