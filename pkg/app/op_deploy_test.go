@@ -2,11 +2,15 @@ package app
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/bwagner5/triad/pkg/registry"
+
+	"github.com/aws/lightsailctl/pkg/build"
 )
 
 // TestApplyStrategyStep_CreateNew records strategy="create-new" when
@@ -290,6 +294,126 @@ func TestDeploySummaryPreamble_OmitsGhActionsWhenOptedOut(t *testing.T) {
 	got := deploySummaryPreamble(in)
 	if strings.Contains(got, "GitHub Actions setup") {
 		t.Errorf("preamble leaks CI section when offer-gh-action=false:\n%s", got)
+	}
+}
+
+// TestPackageStep_DetectsStrategies verifies that packageStep stashes
+// the right strategy enum + reason for each kind of source tree, and
+// fails fast on unknown trees BEFORE running the tarball.
+func TestPackageStep_DetectsStrategies(t *testing.T) {
+	cases := []struct {
+		name     string
+		files    []string
+		want     build.Strategy
+		wantStr  string
+		wantErr  bool
+		errSnip  string
+	}{
+		{"compose", []string{"docker-compose.yml"}, build.StrategyCompose, "compose", false, ""},
+		{"dockerfile", []string{"Dockerfile"}, build.StrategyDockerfile, "dockerfile", false, ""},
+		{"go", []string{"go.mod"}, build.StrategyBuildpack, "buildpack", false, ""},
+		{"node", []string{"package.json"}, build.StrategyBuildpack, "buildpack", false, ""},
+		{"unknown", []string{"README.md"}, build.StrategyUnknown, "", true, "can't deploy this directory"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, f := range tc.files {
+				if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Chdir(dir)
+			st := &registry.State{Input: registry.Input{}, Data: map[string]any{}}
+			err := packageStep(context.Background(), st)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got nil; data=%v", st.Data)
+				}
+				if !strings.Contains(err.Error(), tc.errSnip) {
+					t.Errorf("err = %q; want it to contain %q", err.Error(), tc.errSnip)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if got := st.Data["strategy_enum"]; got != tc.want {
+				t.Errorf("strategy_enum = %v; want %v", got, tc.want)
+			}
+			if got := st.Data["strategy"]; got != tc.wantStr {
+				t.Errorf("strategy = %v; want %q", got, tc.wantStr)
+			}
+			// Cleanup tarball that the success path created.
+			if path, ok := st.Data["tarball"].(string); ok {
+				_ = os.Remove(path)
+			}
+		})
+	}
+}
+
+// TestPortsForStrategy_Buildpack confirms the firewall step opens 8080
+// for non-compose strategies even with no compose file present.
+func TestPortsForStrategy_Buildpack(t *testing.T) {
+	st := &registry.State{Data: map[string]any{"strategy_enum": build.StrategyBuildpack}}
+	if got := portsForStrategy(st); len(got) != 1 || got[0] != 8080 {
+		t.Errorf("buildpack ports = %v; want [8080]", got)
+	}
+	st2 := &registry.State{Data: map[string]any{"strategy_enum": build.StrategyDockerfile}}
+	if got := portsForStrategy(st2); len(got) != 1 || got[0] != 8080 {
+		t.Errorf("dockerfile ports = %v; want [8080]", got)
+	}
+}
+
+// TestBuildStrategyRows_Variants confirms the deploy preamble's
+// "Build strategy" section names what we're going to do.
+func TestBuildStrategyRows_Variants(t *testing.T) {
+	cases := []struct {
+		name      string
+		files     []string
+		wantSnips []string
+	}{
+		{"compose", []string{"docker-compose.yml"}, []string{"compose"}},
+		{"dockerfile", []string{"Dockerfile"}, []string{"Dockerfile", "docker build"}},
+		{"buildpack-go", []string{"go.mod"}, []string{"Cloud Native Buildpacks", "Go", "paketo"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, f := range tc.files {
+				if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Chdir(dir)
+			rows := buildStrategyRows()
+			if len(rows) == 0 {
+				t.Fatalf("got no rows")
+			}
+			joined := ""
+			for _, r := range rows {
+				joined += r[0] + " " + r[1] + "\n"
+			}
+			for _, want := range tc.wantSnips {
+				if !strings.Contains(joined, want) {
+					t.Errorf("rows missing %q:\n%s", want, joined)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildStrategyRows_UnknownIsSilent: an unrecognized tree shows no
+// "Build strategy" rows in the preamble (the saga step will fail with
+// a clear error; the preamble shouldn't lie about a missing strategy).
+func TestBuildStrategyRows_UnknownIsSilent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if rows := buildStrategyRows(); len(rows) != 0 {
+		t.Errorf("got %d rows; want 0 for unknown tree: %v", len(rows), rows)
 	}
 }
 

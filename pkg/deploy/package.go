@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/aws/lightsailctl/pkg/build"
 )
 
 // Built-in excludes — applied in addition to the user's lightsail.conf ignore list.
@@ -26,6 +28,21 @@ var builtinExcludes = map[string]bool{
 	".DS_Store":    true,
 }
 
+// strategyExcludes lists per-strategy add-ons applied on top of
+// builtinExcludes. Compose users keep the existing behavior (no
+// add-ons) so authoring `compose.yml` is the explicit opt-out.
+//
+// For Dockerfile / buildpack the user typically can't make the
+// upload smaller themselves — buildpacks have no .dockerignore
+// equivalent, and the tarball is uploaded BEFORE docker reads
+// .dockerignore. Pruning common build-artifact dirs at upload time
+// is the only way to keep the round-trip fast on a 100 MB
+// Maven/Gradle/Webpack tree.
+var strategyExcludes = map[build.Strategy][]string{
+	build.StrategyDockerfile: {"target", "dist", "build", "__pycache__", ".next", ".nuxt", "vendor"},
+	build.StrategyBuildpack:  {"target", "dist", "build", "__pycache__", ".next", ".nuxt", "vendor"},
+}
+
 // AssetName builds the S3 key for a deploy tarball: deploy/<unix>-<sha>.tar.gz.
 // Uses the short git SHA of the current HEAD if available, else "nocommit".
 func AssetName() string {
@@ -33,15 +50,10 @@ func AssetName() string {
 }
 
 // Package creates a gzip'd tarball of srcDir, excluding builtinExcludes plus
-// extraIgnore. Returns the temp-file path and its size; caller must os.Remove.
-func Package(srcDir string, extraIgnore []string) (path string, size int64, err error) {
-	excl := map[string]bool{}
-	for k, v := range builtinExcludes {
-		excl[k] = v
-	}
-	for _, x := range extraIgnore {
-		excl[x] = true
-	}
+// any strategy add-ons plus the user's extraIgnore list. Returns the temp-file
+// path and its size; caller must os.Remove.
+func Package(srcDir string, strategy build.Strategy, extraIgnore []string) (path string, size int64, err error) {
+	excl := buildExcludes(strategy, extraIgnore)
 
 	tmp, err := os.CreateTemp("", "lightsail-deploy-*.tar.gz")
 	if err != nil {
@@ -61,15 +73,24 @@ func Package(srcDir string, extraIgnore []string) (path string, size int64, err 
 }
 
 // PackageTo writes the archive to w (for tests).
-func PackageTo(srcDir string, extraIgnore []string, w io.Writer) error {
+func PackageTo(srcDir string, strategy build.Strategy, extraIgnore []string, w io.Writer) error {
+	return tarTo(srcDir, buildExcludes(strategy, extraIgnore), w)
+}
+
+// buildExcludes assembles the final exclude set: builtinExcludes ∪
+// strategyExcludes[strategy] ∪ extraIgnore.
+func buildExcludes(strategy build.Strategy, extraIgnore []string) map[string]bool {
 	excl := map[string]bool{}
 	for k, v := range builtinExcludes {
 		excl[k] = v
 	}
+	for _, x := range strategyExcludes[strategy] {
+		excl[x] = true
+	}
 	for _, x := range extraIgnore {
 		excl[x] = true
 	}
-	return tarTo(srcDir, excl, w)
+	return excl
 }
 
 func tarTo(srcDir string, excl map[string]bool, w io.Writer) error {

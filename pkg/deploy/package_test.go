@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+
+	"github.com/aws/lightsailctl/pkg/build"
 )
 
 func TestPackageExcludesBuiltinsAndExtra(t *testing.T) {
@@ -26,7 +28,7 @@ func TestPackageExcludesBuiltinsAndExtra(t *testing.T) {
 	mustWrite(t, filepath.Join(src, "src/main.go"), "package main")
 
 	var buf bytes.Buffer
-	if err := PackageTo(src, []string{".venv"}, &buf); err != nil {
+	if err := PackageTo(src, build.StrategyCompose, []string{".venv"}, &buf); err != nil {
 		t.Fatal(err)
 	}
 	got := listTar(t, &buf)
@@ -36,6 +38,52 @@ func TestPackageExcludesBuiltinsAndExtra(t *testing.T) {
 	if !equalStrSlices(got, want) {
 		t.Errorf("tar entries = %v; want %v", got, want)
 	}
+}
+
+// TestPackageStrategyExcludes_Buildpack verifies that build-artifact
+// directories are pruned from the upload for buildpack/Dockerfile
+// strategies but not for compose. Compose users keep their existing
+// (smaller exclude set) behavior.
+func TestPackageStrategyExcludes_Buildpack(t *testing.T) {
+	src := t.TempDir()
+	mustWrite(t, filepath.Join(src, "main.go"), "package main")
+	mustWrite(t, filepath.Join(src, "go.mod"), "module x")
+	mustWrite(t, filepath.Join(src, "target/build.jar"), "x")
+	mustWrite(t, filepath.Join(src, "dist/bundle.js"), "x")
+	mustWrite(t, filepath.Join(src, "build/out.bin"), "x")
+	mustWrite(t, filepath.Join(src, "vendor/lib.go"), "x")
+
+	var bp bytes.Buffer
+	if err := PackageTo(src, build.StrategyBuildpack, nil, &bp); err != nil {
+		t.Fatal(err)
+	}
+	got := listTar(t, &bp)
+	sort.Strings(got)
+	want := []string{"go.mod", "main.go"}
+	sort.Strings(want)
+	if !equalStrSlices(got, want) {
+		t.Errorf("buildpack tar entries = %v; want %v", got, want)
+	}
+
+	// Compose path should keep target/dist/build/vendor (user
+	// authored the compose file, they choose what's inside).
+	var cp bytes.Buffer
+	if err := PackageTo(src, build.StrategyCompose, nil, &cp); err != nil {
+		t.Fatal(err)
+	}
+	composeEntries := listTar(t, &cp)
+	if !contains(composeEntries, "target/build.jar") {
+		t.Errorf("compose strategy unexpectedly pruned target/; entries = %v", composeEntries)
+	}
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, h := range haystack {
+		if h == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func mustWrite(t *testing.T, path, body string) {

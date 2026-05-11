@@ -15,6 +15,7 @@ import (
 
 	"github.com/aws/lightsailctl/internal"
 	"github.com/aws/lightsailctl/pkg/agentfetch"
+	"github.com/aws/lightsailctl/pkg/build"
 	"github.com/aws/lightsailctl/pkg/compose"
 	"github.com/aws/lightsailctl/pkg/config"
 	"github.com/aws/lightsailctl/pkg/deploy"
@@ -776,14 +777,33 @@ func pinRegion(s *store, region string) {
 	}
 }
 
-// needInputForCreate builds a NeedInput listing only the fields that aren't
-// already set, so the user doesn't re-answer things they already provided.
+// packageStep tars the source tree for upload. As of buildpack support,
+// it accepts compose / Dockerfile / buildpack source trees — anything
+// build.Detect recognizes. Unknown trees fail fast here so the user
+// doesn't pay the upload cost before learning we can't build it.
+//
+// The detected strategy is stashed in st.Data["strategy_enum"] (raw
+// build.Strategy) and st.Data["strategy"] (string for logs / preamble).
+// Downstream steps read it to decide firewall ports, build commands,
+// etc.
 func packageStep(ctx context.Context, st *registry.State) error {
-	if compose.Find() == "" {
-		return errors.New("no docker-compose.yml in current directory")
+	strategy, reason, err := build.Detect(".")
+	if err != nil {
+		return fmt.Errorf("detect build strategy: %w", err)
 	}
+	if strategy == build.StrategyUnknown {
+		return errors.New(
+			"can't deploy this directory: " + reason +
+				". Add a docker-compose.yml, a Dockerfile, " +
+				"or a recognized language manifest (go.mod, package.json, " +
+				"requirements.txt, pom.xml, *.csproj, Gemfile, composer.json, index.html, …)")
+	}
+	st.Data["strategy_enum"] = strategy
+	st.Data["strategy"] = strategy.String()
+	st.Data["strategy_reason"] = reason
+
 	ignore, _ := st.Data["ignore"].([]string)
-	path, _, err := deploy.Package(".", ignore)
+	path, _, err := deploy.Package(".", strategy, ignore)
 	if err != nil {
 		return err
 	}
@@ -835,12 +855,8 @@ func uploadStep(ctx context.Context, st *registry.State) error {
 
 func firewallStep(s *store) func(context.Context, *registry.State) error {
 	return func(ctx context.Context, st *registry.State) error {
-		composePath := compose.Find()
-		if composePath == "" {
-			return nil
-		}
-		ports, err := compose.ParsePorts(composePath)
-		if err != nil || len(ports) == 0 {
+		ports := portsForStrategy(st)
+		if len(ports) == 0 {
 			return nil
 		}
 		c, err := s.ensure(ctx)
@@ -854,6 +870,31 @@ func firewallStep(s *store) func(context.Context, *registry.State) error {
 		for _, t := range targets {
 			_, _ = c.OpenFirewallPorts(ctx, t.Name, ports)
 		}
+		return nil
+	}
+}
+
+// portsForStrategy returns the host ports the firewallStep should
+// open. Compose: parse what the user authored. Dockerfile/buildpack:
+// open 8080 optimistically — the agent will open the actual port
+// (Dockerfile EXPOSE may differ) once it knows it. Unknown / no
+// strategy yet: nothing.
+func portsForStrategy(st *registry.State) []int {
+	strategy, _ := st.Data["strategy_enum"].(build.Strategy)
+	switch strategy {
+	case build.StrategyCompose:
+		composePath := compose.Find()
+		if composePath == "" {
+			return nil
+		}
+		ports, err := compose.ParsePorts(composePath)
+		if err != nil {
+			return nil
+		}
+		return ports
+	case build.StrategyDockerfile, build.StrategyBuildpack:
+		return []int{8080}
+	default:
 		return nil
 	}
 }

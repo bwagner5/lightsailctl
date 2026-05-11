@@ -7,6 +7,7 @@ import (
 
 	"github.com/bwagner5/triad/pkg/registry"
 
+	"github.com/aws/lightsailctl/pkg/build"
 	"github.com/aws/lightsailctl/pkg/iamoidc"
 	"github.com/aws/lightsailctl/pkg/instance"
 )
@@ -100,6 +101,13 @@ func deploySummaryPreamble(in registry.Input) string {
 		})
 	}
 
+	// Build strategy: detect now from the working directory so the
+	// user sees what we'll do BEFORE confirming. Same Detect() the
+	// saga's packageStep will call, so they can't disagree.
+	if rows := buildStrategyRows(); len(rows) > 0 {
+		writePreambleSection(&b, "Build strategy", rows)
+	}
+
 	// GitHub Actions setup — only when this is a first-time deploy
 	// of a GitHub-hosted repo AND the user opted in at the offer
 	// prompt. Surfaces what IAM role will be created and what it
@@ -138,6 +146,35 @@ func deploySummaryPreamble(in registry.Input) string {
 		writePreambleSection(&b, "GitHub Actions setup", rows)
 	}
 	return b.String()
+}
+
+// buildStrategyRows returns the rows the deploy preamble shows in
+// its "Build strategy" section. Detection runs against the cwd so the
+// answer matches what packageStep will compute later. Errors and
+// StrategyUnknown both yield no rows (the section is suppressed) —
+// the saga step will surface a clear error if the tree is unbuildable;
+// here we just don't lie to the user.
+func buildStrategyRows() [][2]string {
+	strategy, reason, err := build.Detect(".")
+	if err != nil || strategy == build.StrategyUnknown {
+		return nil
+	}
+	switch strategy {
+	case build.StrategyCompose:
+		return [][2]string{{"Strategy", "compose (" + reason + ")"}}
+	case build.StrategyDockerfile:
+		return [][2]string{
+			{"Strategy", "Dockerfile"},
+			{"Builder", "docker build"},
+		}
+	case build.StrategyBuildpack:
+		return [][2]string{
+			{"Strategy", "Cloud Native Buildpacks (" + reason + ")"},
+			{"Builder", "paketobuildpacks/builder-jammy-base"},
+			{"Note", "no Dockerfile needed — built on the instance"},
+		}
+	}
+	return nil
 }
 
 // writePreambleSection is the summary helper used by
