@@ -142,6 +142,10 @@ func renderShort(w io.Writer, rep Report) error {
 		running := 0
 		total := 0
 		overall := "idle"
+		// Mid-deploy Phase is more useful than the rolled-up
+		// status for one-line summaries; surface the latest one
+		// across env instances if any watcher reports it.
+		var phase string
 		for _, s := range er.Statuses {
 			for _, c := range s.Containers {
 				total++
@@ -152,6 +156,12 @@ func renderShort(w io.Writer, rep Report) error {
 			if s.Status != "" && s.Status != "idle" {
 				overall = s.Status
 			}
+			if s.Phase != "" {
+				phase = s.Phase
+			}
+		}
+		if phase != "" {
+			overall = phase
 		}
 		nInst := len(er.Statuses)
 		if total == 0 {

@@ -20,6 +20,16 @@ type Status struct {
 	LastDeploy *DeployInfo       `json:"last_deploy,omitempty"`
 	Containers []ContainerStatus `json:"containers,omitempty"`
 	Endpoints  []string          `json:"endpoints,omitempty"`
+	// Phase is the current step inside an in-flight deploy:
+	// "downloading" | "extracting" | "detecting" | "building" |
+	// "starting" | "pruning" | "healthy" | "failed" | "" (idle).
+	// Empty when the watcher isn't mid-deploy. Paired with
+	// PhaseSince to show how long the watcher has been in this
+	// phase. PhaseSince is a pointer so its zero value can be
+	// omitted from the JSON cleanly (time.Time + omitempty doesn't
+	// honor IsZero on its own).
+	Phase      string     `json:"phase,omitempty"`
+	PhaseSince *time.Time `json:"phase_since,omitempty"`
 }
 
 // DeployInfo describes the last-deployed asset.

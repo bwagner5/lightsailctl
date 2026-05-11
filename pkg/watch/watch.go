@@ -47,6 +47,15 @@ func DefaultOptions(app, env, region string) Options {
 	return Options{App: app, Env: env, Region: region, Interval: 15 * time.Second, KeepPrevious: 3}
 }
 
+// phaseState is the watcher's current deploy-phase report. The
+// pollAndApply path mutates it directly; status writers read it under
+// the same goroutine (single-writer, no mutex needed). Empty Phase
+// means "watcher is idle, no deploy in flight".
+type phaseState struct {
+	Phase string
+	Since time.Time
+}
+
 // Run starts the watch loop. Blocks until ctx is cancelled.
 func Run(ctx context.Context, opts Options) error {
 	if opts.Interval == 0 {
@@ -99,8 +108,13 @@ func Run(ctx context.Context, opts Options) error {
 		log.InfoContext(ctx, "no previous deployment found, starting fresh")
 	}
 
+	// Phase tracker. The poll closure below mutates it as the deploy
+	// progresses; the status writer reads it on every push. Both run
+	// on the same goroutine, so no mutex is needed.
+	phase := &phaseState{}
+
 	// Initial status upload so `app status` shows something immediately.
-	writeStatus(ctx, log, svc, bucket, opts.Region, instance, lastKey, currentDir)
+	writeStatus(ctx, log, svc, bucket, opts.Region, instance, lastKey, currentDir, phase)
 
 	ticker := time.NewTicker(opts.Interval)
 	defer ticker.Stop()
@@ -162,17 +176,33 @@ func Run(ctx context.Context, opts Options) error {
 			slog.String("previous", lastKey),
 			slog.Int("total_assets", len(allKeys)))
 		start := time.Now()
-		if derr := pullAndApply(ctx, log, svc, bucket, latest, baseDir, currentDir); derr != nil {
+		// Closure for pullAndApply to publish phase transitions
+		// without copy-pasting all the state needed to write
+		// status.json. setPhase + put together; failures logged
+		// at warn so a transient S3 hiccup mid-deploy doesn't
+		// abort the build path.
+		pushPhase := func(name string) {
+			setPhase(phase, name)
+			body := statusJSON(instance, bucket, opts.Region, latest, currentDir, phase)
+			if err := put(ctx, svc, bucket, instance+lightsail.StatusSuffix, []byte(body), "application/json"); err != nil {
+				log.WarnContext(ctx, "phase status push failed",
+					slog.String("phase", name),
+					slog.Any("err", err))
+			}
+		}
+		if derr := pullAndApply(ctx, log, svc, bucket, latest, baseDir, currentDir, pushPhase); derr != nil {
 			log.ErrorContext(ctx, "deployment failed",
 				slog.String("key", latest),
 				slog.Duration("elapsed", time.Since(start)),
 				slog.Any("err", derr))
+			pushPhase("failed")
 			lastPoll = pollDeployFailed
 			return
 		}
 		log.InfoContext(ctx, "deployment succeeded",
 			slog.String("key", latest),
 			slog.Duration("elapsed", time.Since(start)))
+		setPhase(phase, "")
 		lastKey = latest
 		_ = os.WriteFile(stateFile, []byte(latest), 0o644)
 		prune(ctx, svc, bucket, allKeys, opts.KeepPrevious)
@@ -182,9 +212,11 @@ func Run(ctx context.Context, opts Options) error {
 	// pushStatusIfChanged uploads status to S3 on content change or
 	// once a minute as a heartbeat. Runs after every poll so container
 	// state changes (crashes, restarts) propagate even without a new
-	// deploy.
+	// deploy. The phase pointer is passed through so a phase-only
+	// transition (e.g. extracting → building) shows up on the next
+	// push without waiting for any other state change.
 	pushStatusIfChanged := func() {
-		body := statusJSON(instance, bucket, opts.Region, lastKey, currentDir)
+		body := statusJSON(instance, bucket, opts.Region, lastKey, currentDir, phase)
 		if body == lastStatusBody && time.Since(lastStatusAt) <= time.Minute {
 			return
 		}
@@ -267,8 +299,31 @@ func findLatest(ctx context.Context, svc *s3.Client, bucket string) (latest stri
 	return keys[0], keys, nil
 }
 
-func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket, key, baseDir, currentDir string) error {
+// setPhase records a phase transition. Empty string clears the
+// phase (watcher idle). Caller is responsible for pushing the
+// status afterwards if it wants the change to reach `app status`
+// before the next minute heartbeat — pullAndApply does so via the
+// pushPhase closure.
+func setPhase(p *phaseState, phase string) {
+	if p == nil {
+		return
+	}
+	if p.Phase == phase {
+		return
+	}
+	p.Phase = phase
+	p.Since = time.Now().UTC()
+}
+
+// pushPhase is the callback type pullAndApply uses to publish
+// phase transitions during a deploy. The closure passed in by Run
+// captures region/instance/lastKey/currentDir/svc/bucket so this
+// signature stays small.
+type pushPhaseFunc func(name string)
+
+func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket, key, baseDir, currentDir string, pushPhase pushPhaseFunc) error {
 	// Step 1: Download the deploy asset from S3.
+	pushPhase("downloading")
 	log.InfoContext(ctx, "downloading deploy asset",
 		slog.String("bucket", bucket), slog.String("key", key))
 	dlStart := time.Now()
@@ -302,6 +357,7 @@ func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket,
 		slog.Duration("elapsed", time.Since(dlStart)))
 
 	// Step 2: Extract the tarball.
+	pushPhase("extracting")
 	log.InfoContext(ctx, "extracting tarball", slog.String("dest", staging))
 	if err := runCmd(ctx, log, "", "tar", "xzf", tmp, "-C", staging); err != nil {
 		return fmt.Errorf("extract: %w", err)
@@ -325,6 +381,7 @@ func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket,
 	// (Tasks 6/7), only compose actually proceeds; everything else
 	// fails fast here so the live service isn't taken down by an
 	// unimplemented build path.
+	pushPhase("detecting")
 	strategy, reason, derr := build.Detect(staging)
 	if derr != nil {
 		return fmt.Errorf("detect strategy: %w", derr)
@@ -360,6 +417,7 @@ func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket,
 		slog.String("path", currentDir))
 
 	// Step 5: Start the new deployment.
+	pushPhase("starting")
 	cf := findCompose(currentDir)
 	if cf == "" {
 		return fmt.Errorf("no compose file found in deployed asset (looked for docker-compose.yml, compose.yml, etc.)")
@@ -409,8 +467,8 @@ func prune(ctx context.Context, svc *s3.Client, bucket string, all []string, kee
 	})
 }
 
-func writeStatus(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket, region, instance, lastKey, currentDir string) {
-	body := statusJSON(instance, bucket, region, lastKey, currentDir)
+func writeStatus(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket, region, instance, lastKey, currentDir string, phase *phaseState) {
+	body := statusJSON(instance, bucket, region, lastKey, currentDir, phase)
 	if err := put(ctx, svc, bucket, instance+lightsail.StatusSuffix, []byte(body), "application/json"); err != nil {
 		log.WarnContext(ctx, "initial status upload failed",
 			slog.Any("err", err))
@@ -433,11 +491,16 @@ func deployTimeFromKey(key string) time.Time {
 	return time.Now().UTC()
 }
 
-func statusJSON(instance, bucket, region, lastKey, currentDir string) string {
+func statusJSON(instance, bucket, region, lastKey, currentDir string, phase *phaseState) string {
 	st := lightsail.Status{
 		Instance:  instance,
 		Timestamp: time.Now().UTC(),
 		Status:    "idle",
+	}
+	if phase != nil && phase.Phase != "" {
+		st.Phase = phase.Phase
+		since := phase.Since
+		st.PhaseSince = &since
 	}
 	if lastKey != "" {
 		st.LastDeploy = &lightsail.DeployInfo{

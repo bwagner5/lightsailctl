@@ -1004,7 +1004,12 @@ func waitStep(s *store) func(context.Context, *registry.State) error {
 // an empty string when nothing's been reported yet so the parent error
 // sentence reads cleanly.
 //
-// Output shape: " — last observed: box-a=idle (0/0) (pre-deploy), box-b=degraded (1/2)"
+// Output shape: " — last observed: box-a=building (0/0) (pre-deploy), box-b=degraded (1/2)"
+//
+// When the watcher is mid-deploy it reports a Phase ("downloading",
+// "extracting", "building", …); we surface that instead of the
+// rolled-up status string because "idle" or "down" during a build
+// reads as a stuck deploy when the watcher is actually progressing.
 func lastStatusSummary(ctx context.Context, c *lightsail.Client, bucket, asset string, since time.Time) string {
 	statuses, err := c.ReadBucketStatuses(ctx, bucket)
 	if err != nil || len(statuses) == 0 {
@@ -1019,7 +1024,16 @@ func lastStatusSummary(ctx context.Context, c *lightsail.Client, bucket, asset s
 			}
 		}
 		state := s.Status
-		if state == "" {
+		if s.Phase != "" {
+			// Phase is more informative than the rolled-up status
+			// during an active deploy. e.g. "extracting (3s)" reads
+			// as progress where "down" reads as failure.
+			elapsed := ""
+			if s.PhaseSince != nil && !s.PhaseSince.IsZero() {
+				elapsed = fmt.Sprintf(" (%ds)", int(time.Since(*s.PhaseSince).Seconds()))
+			}
+			state = s.Phase + elapsed
+		} else if state == "" {
 			state = "unknown"
 		}
 		note := ""
