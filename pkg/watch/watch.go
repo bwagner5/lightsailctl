@@ -29,6 +29,7 @@ import (
 	"github.com/bwagner5/triad/pkg/trace"
 
 	"github.com/aws/lightsailctl/internal/logging"
+	"github.com/aws/lightsailctl/pkg/build"
 	"github.com/aws/lightsailctl/pkg/lightsail"
 )
 
@@ -314,6 +315,28 @@ func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket,
 		log.InfoContext(ctx, "extracted files",
 			slog.Int("count", len(names)),
 			slog.String("files", strings.Join(names, ", ")))
+	}
+
+	// Step 2b: Detect what we're deploying. Same Detect() the client
+	// ran pre-upload, so the answer can't disagree across the wire.
+	// The agent's call is the authoritative one — even if a future
+	// client version forgot to detect, the agent still picks the
+	// right build path. Until non-compose strategies are wired up
+	// (Tasks 6/7), only compose actually proceeds; everything else
+	// fails fast here so the live service isn't taken down by an
+	// unimplemented build path.
+	strategy, reason, derr := build.Detect(staging)
+	if derr != nil {
+		return fmt.Errorf("detect strategy: %w", derr)
+	}
+	log.InfoContext(ctx, "detected build strategy",
+		slog.String("strategy", strategy.String()),
+		slog.String("reason", reason))
+	if strategy != build.StrategyCompose {
+		return fmt.Errorf(
+			"build strategy %q (%s) is recognized but not yet implemented in the agent — "+
+				"this watcher only supports compose deploys for now",
+			strategy.String(), reason)
 	}
 
 	// Step 3: Stop the old deployment.
