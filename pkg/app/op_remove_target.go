@@ -34,7 +34,7 @@ import (
 func removeTargetOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
 	return registry.Operation{
 		Name:             "remove-target",
-		Key:              "T",
+		Key:              "shift+t",
 		Short:            "remove an instance from deployment targets",
 		Confirm:          "Remove this instance from the deployment targets?",
 		NeedsExistingRow: true,

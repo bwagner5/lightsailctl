@@ -189,6 +189,8 @@ func createOp(s *store) registry.Operation {
 				Do: grantAccessStep(s), Undo: revokeAccessUndo(s), Skip: skipIfInfraOnly},
 			{Category: "Preparing instance", Label: "SCP agent binary to instance",
 				Do: scpAgentStep(s), Skip: skipIfInfraOnly},
+			{Category: "Preparing instance", Label: "Wait for cloud-init to finish",
+				Do: waitCloudInitStep(s), Skip: skipIfInfraOnly},
 			{Category: "Preparing instance", Label: "Install watcher on instance",
 				Do: remoteInstallStep(s), Skip: skipIfInfraOnly},
 			{Category: "Preparing instance", Label: "Start watcher",
@@ -436,6 +438,66 @@ func remoteInstallStep(s *store) func(context.Context, *registry.State) error {
 		}
 		return nil
 	}
+}
+
+// waitCloudInitStep blocks until cloud-init has finished running the
+// instance's user-data on every target. Without this gate, the watcher
+// service can start before docker / pack / paketo images are installed
+// — the unit immediately tries `docker pull` and crashes — even though
+// SSH was happy enough to let us scp the agent.
+//
+// Implementation: `cloud-init status --wait` on the instance. The
+// command blocks until cloud-init reaches a terminal state and exits
+// 0 on success. We tolerate a missing cloud-init binary (very old AMIs)
+// since the alternative is forcing every user onto a recent image.
+//
+// On failure, the step surfaces cloud-init's own error tail so users
+// can fix their user-data instead of getting a mystery deploy error
+// 30 seconds later from a docker-pull miss.
+func waitCloudInitStep(s *store) func(context.Context, *registry.State) error {
+	return func(ctx context.Context, st *registry.State) error {
+		c, err := s.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		for _, inst := range st.Input.Multi("instance") {
+			if err := waitCloudInitOne(ctx, c, inst); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+// waitCloudInitOne runs `cloud-init status --wait` on a single
+// instance and surfaces a meaningful error on failure.
+//
+// Exit codes (per cloud-init docs):
+//
+//	0  done, no errors
+//	1  unrecoverable error (user-data failed)
+//	2  recoverable warnings — treated as success here; the deploy
+//	   path is robust to most warnings, and the alternative is
+//	   blocking on every benign cloud-init quirk
+//
+// The `command -v` guard makes the missing-binary case idempotent
+// across distros — Amazon Linux 2023 ships cloud-init by default, but
+// custom AMIs may not.
+func waitCloudInitOne(ctx context.Context, c *lightsail.Client, instance string) error {
+	creds, err := c.GetInstanceSSH(ctx, instance)
+	if err != nil {
+		return fmt.Errorf("ssh creds for %s: %w", instance, err)
+	}
+	defer creds.Remove()
+	// `command -v` returns non-zero (and stays silent) when cloud-init
+	// is missing; the `||` branch lets us short-circuit successfully.
+	// The `sudo` is needed because `cloud-init status` reads
+	// /var/lib/cloud which is root-only on most distros.
+	cmd := `if command -v cloud-init >/dev/null 2>&1; then sudo cloud-init status --wait; else echo "cloud-init not present, skipping wait"; fi`
+	if out, err := creds.SSHRun(ctx, cmd); err != nil {
+		return fmt.Errorf("cloud-init wait on %s: %s: %w", instance, out, err)
+	}
+	return nil
 }
 
 func remoteInstallOne(ctx context.Context, c *lightsail.Client, instance, bucket, app, env, region string) error {

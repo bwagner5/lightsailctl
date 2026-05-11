@@ -245,6 +245,7 @@ func deployOp(s *store) registry.Operation {
 			{Category: "Preparing instance", Label: "Tag target instance", Do: tagInstanceStep(s), Skip: skipIfAbortedOrAppExists},
 			{Category: "Preparing instance", Label: "Grant instance bucket access", Do: grantAccessStep(s), Skip: skipIfAbortedOrAppExists},
 			{Category: "Preparing instance", Label: "Copy agent binary to instance", Do: scpAgentStep(s), Skip: skipIfAbortedOrAppExists},
+			{Category: "Preparing instance", Label: "Wait for cloud-init to finish", Do: waitCloudInitStep(s), Skip: skipIfAbortedOrAppExists},
 			{Category: "Preparing instance", Label: "Install agent on instance", Do: remoteInstallStep(s), Skip: skipIfAbortedOrAppExists},
 			{Category: "Preparing instance", Label: "Start agent on instance", Do: remoteUpStep(s), Skip: skipIfAbortedOrAppExists},
 

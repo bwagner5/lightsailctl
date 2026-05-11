@@ -578,11 +578,15 @@ func buildBuildpack(ctx context.Context, log *slog.Logger, staging, tag, app, en
 		slog.String("tag", tag),
 		slog.String("builder", builder),
 		slog.String("cache", cache))
+	// pack's --cache flag wants type=<build|launch>;format=<image|volume>;name=<value>.
+	// We want a per-app/env named volume that survives across deploys
+	// for the build cache (launch cache is image-only and not useful
+	// here).
 	if err := runCmd(ctx, log, staging, "pack", "build", tag,
 		"--builder", builder,
 		"--path", ".",
 		"--trust-builder",
-		"--cache", "type=volume;name="+cache,
+		"--cache", "type=build;format=volume;name="+cache,
 	); err != nil {
 		return fmt.Errorf("pack build: %w", err)
 	}

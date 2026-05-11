@@ -58,6 +58,7 @@ func addTargetOp(s *store) registry.Operation {
 			{Category: "Preparing instance", Label: "Tag target instance", Do: tagInstanceStep(s), Undo: untagInstanceUndo(s)},
 			{Category: "Preparing instance", Label: "Grant instance bucket access", Do: grantAccessStep(s), Undo: revokeAccessUndo(s)},
 			{Category: "Preparing instance", Label: "SCP agent binary to instance", Do: scpAgentStep(s)},
+			{Category: "Preparing instance", Label: "Wait for cloud-init to finish", Do: waitCloudInitStep(s)},
 			{Category: "Preparing instance", Label: "Install watcher on instance", Do: remoteInstallStep(s)},
 			{Category: "Preparing instance", Label: "Start watcher", Do: remoteUpStep(s)},
 			{Category: "Preparing instance", Label: "Open firewall ports", Do: addTargetFirewallStep(s)},

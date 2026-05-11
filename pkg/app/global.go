@@ -10,8 +10,7 @@ import (
 )
 
 // RegionSwitchOp returns a triad GlobalOp that lets TUI users switch the
-// CLI's effective region at runtime. Bound to key "g" (for "global" →
-// pick a scope).
+// CLI's effective region at runtime. Bound to key "r" for "region".
 //
 // The field is Required so the wizard always fires — even when the input
 // happens to be "". Triad's missing-required check skips fields that are
@@ -19,7 +18,7 @@ import (
 // time the op is invoked.
 func RegionSwitchOp(region *string) registry.Operation {
 	return registry.Operation{
-		Name: "region", Key: "g", Short: "switch region (blank = global)",
+		Name: "region", Key: "r", Short: "switch region (blank = global)",
 		Fields: []registry.Field{
 			{
 				Flag: "region", Required: true, Help: "AWS region (blank = global)",

@@ -23,10 +23,10 @@ func TestRemoveTargetOpRegistered(t *testing.T) {
 		t.Errorf("Name = %q; want remove-target", op.Name)
 	}
 	// TUI reachability: remove-target must bind a key and declare
-	// NeedsExistingRow so the "T" hint hides on an empty table but
-	// shows as soon as an app row is selected.
-	if op.Key != "T" {
-		t.Errorf("Key = %q; want T", op.Key)
+	// NeedsExistingRow so the "shift+t" hint hides on an empty table
+	// but shows as soon as an app row is selected.
+	if op.Key != "shift+t" {
+		t.Errorf("Key = %q; want shift+t", op.Key)
 	}
 	if !op.NeedsExistingRow {
 		t.Error("NeedsExistingRow = false; want true (remove-target needs a selected app)")

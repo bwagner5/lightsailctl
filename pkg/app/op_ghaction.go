@@ -33,7 +33,7 @@ import (
 
 func enableGhActionOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
 	return registry.Operation{
-		Name: "enable-gh-action", Aliases: []string{"enable-ci"}, Key: "G",
+		Name: "enable-gh-action", Aliases: []string{"enable-ci"}, Key: "shift+g",
 		Short: "set up a GitHub Actions deploy workflow for this app",
 		// Only surface the "enable" key binding when the workflow file
 		// isn't already sitting in the cwd. When it IS present,
@@ -92,7 +92,7 @@ func enableGhActionOp(s *store, suggest func(context.Context) ([]registry.Choice
 
 func disableGhActionOp(s *store, suggest func(context.Context) ([]registry.Choice, error)) registry.Operation {
 	return registry.Operation{
-		Name: "disable-gh-action", Aliases: []string{"disable-ci"}, Key: "shift+G",
+		Name: "disable-gh-action", Aliases: []string{"disable-ci"}, Key: "shift+g",
 		Short:   "remove the GitHub Actions deploy workflow and its IAM role",
 		Confirm: "Delete the CI IAM role and local workflow file?",
 		// Mirror of enable-gh-action's Enabled: only show the key

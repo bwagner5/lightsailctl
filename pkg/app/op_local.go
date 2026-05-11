@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -136,7 +137,24 @@ func localLogsCmd() *cobra.Command {
 // localInstall writes the systemd unit file + the .bucket/.instance markers.
 // The binary itself is placed by the scp-from-client step in `app create`.
 // Idempotent.
+//
+// Runs as root (invoked via `sudo` from the client), but the watcher
+// itself runs as the `lightsailctl` system user. We create the user
+// here rather than relying solely on dockerize-remote.sh because:
+//
+//   - cloud-init runs user-data asynchronously, and SSH typically
+//     becomes available before user-data finishes. A `localInstall`
+//     SSH'd in during bootstrap would otherwise race the useradd in
+//     the script.
+//   - users supply their own user-data on `app create`, so we can't
+//     assume dockerize-remote.sh ran at all.
+//
+// The user creation + chown are idempotent so re-running on an
+// already-bootstrapped instance is a no-op.
 func localInstall(app, env, bucket, region, instance string) error {
+	if err := ensureServiceUser(); err != nil {
+		return fmt.Errorf("ensure %s user: %w", serviceUser, err)
+	}
 	base := filepath.Join(lightsail.BaseDir, app, env)
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		return err
@@ -150,11 +168,20 @@ func localInstall(app, env, bucket, region, instance string) error {
 	if instance != "" {
 		_ = os.WriteFile(filepath.Join(base, ".instance"), []byte(instance), 0o644)
 	}
+	if err := chownTree(filepath.Join(lightsail.BaseDir, app), serviceUser, serviceUser); err != nil {
+		return fmt.Errorf("chown %s: %w", base, err)
+	}
 	unit := fmt.Sprintf(lightsail.UnitNameFmt, app, env)
 	// The --log-dest=stderr argument routes structured records into
 	// journald (via StandardOutput/Error=journal) so operators can run
 	// `journalctl -u lightsailctl-<app>-<env>` to review watcher
 	// behavior. No on-disk log file is kept on the instance.
+	//
+	// User=/Group= drop privileges to the lightsailctl service user
+	// created by dockerize-remote.sh. systemd auto-derives HOME from
+	// the user's passwd entry, which is what `pack` needs.
+	// SupplementaryGroups=docker grants daemon access without
+	// touching primary-group semantics.
 	unitBody := fmt.Sprintf(`[Unit]
 Description=Lightsail deployment watcher for %s/%s
 After=network.target docker.service
@@ -162,6 +189,9 @@ Wants=docker.service
 
 [Service]
 Type=simple
+User=%s
+Group=%s
+SupplementaryGroups=docker
 StandardOutput=journal
 StandardError=journal
 ExecStart=/usr/local/bin/lightsailctl --log-dest=stderr app local watch --app %s --env %s --region %s
@@ -170,8 +200,63 @@ RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
-`, app, env, app, env, region)
+`, app, env, serviceUser, serviceUser, app, env, region)
 	return os.WriteFile(fmt.Sprintf("/etc/systemd/system/%s.service", unit), []byte(unitBody), 0o644)
+}
+
+// serviceUser is the unprivileged system user the watcher runs as.
+// Matched in the systemd unit's User=/Group= directives. The user is
+// created on demand by ensureServiceUser; dockerize-remote.sh creates
+// it ahead of time as a courtesy so the first deploy doesn't pay the
+// useradd cost.
+const serviceUser = "lightsailctl"
+
+// ensureServiceUser creates the lightsailctl system user if it
+// doesn't already exist, and ensures it's in the docker group so the
+// watcher can drive `docker build` / `pack build` against the local
+// daemon. Idempotent: re-runs on an existing user are no-ops aside
+// from the gpasswd call (which is also idempotent).
+//
+// Runs as root (localInstall is invoked under sudo from the client).
+// Errors propagate so the caller can refuse to write the unit file
+// against a missing user — the watcher would fail to start otherwise.
+func ensureServiceUser() error {
+	if _, err := exec.LookPath("useradd"); err != nil {
+		return fmt.Errorf("useradd not found in PATH: %w", err)
+	}
+	if _, err := user.Lookup(serviceUser); err == nil {
+		// Already exists; just make sure it's in the docker group.
+		// Failure here is non-fatal: the bootstrap script has the
+		// canonical group config, and an admin may have intentionally
+		// pruned membership. Log via the returned error from chown.
+		_ = exec.Command("usermod", "-aG", "docker", serviceUser).Run()
+		return nil
+	}
+	args := []string{"--system", "--create-home", "--shell", "/bin/bash", serviceUser}
+	if out, err := exec.Command("useradd", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("useradd %s: %s: %w", serviceUser, strings.TrimSpace(string(out)), err)
+	}
+	if out, err := exec.Command("usermod", "-aG", "docker", serviceUser).CombinedOutput(); err != nil {
+		return fmt.Errorf("usermod -aG docker %s: %s: %w", serviceUser, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// chownTree recursively chowns dir to user:group. Best-effort on
+// individual entries: a missing dir is fine (nothing to do); a
+// permission error on an unrelated file shouldn't abort install.
+func chownTree(dir, user, group string) error {
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	cmd := exec.Command("chown", "-R", user+":"+group, dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("chown -R %s:%s %s: %s: %w", user, group, dir, strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }
 
 func localDown(app, env string) error {
