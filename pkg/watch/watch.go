@@ -346,11 +346,29 @@ func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket,
 	if err := downloadAndExtract(ctx, log, svc, bucket, key, baseDir, staging, pushPhase); err != nil {
 		return err
 	}
-	strategy, err := buildAndStage(ctx, log, staging, pushPhase)
+	strategy, err := buildAndStage(ctx, log, staging, key, pushPhase)
 	if err != nil {
 		return err
 	}
-	return swap(ctx, log, staging, currentDir, strategy, pushPhase)
+	if err := swap(ctx, log, staging, currentDir, strategy, pushPhase); err != nil {
+		return err
+	}
+	// Best-effort cleanup: drop dangling images left behind by
+	// successive `docker build` / `pack build` runs. Tagged images
+	// (current + previous ls-<app>-<env>:<sha>) survive.
+	pruneDanglingImages(ctx, log, pushPhase)
+	return nil
+}
+
+// pruneDanglingImages runs `docker image prune -f` on dangling-only
+// (default) images. Best-effort: a failure is logged at warn but
+// doesn't fail the deploy. The buildpack cache volume is unaffected.
+func pruneDanglingImages(ctx context.Context, log *slog.Logger, pushPhase pushPhaseFunc) {
+	pushPhase("pruning")
+	if err := runCmd(ctx, log, "", "docker", "image", "prune", "-f"); err != nil {
+		log.WarnContext(ctx, "image prune failed (continuing)",
+			slog.Any("err", err))
+	}
 }
 
 // downloadAndExtract is phase 1: pull + unpack into a fresh
@@ -408,9 +426,17 @@ func downloadAndExtract(ctx context.Context, log *slog.Logger, svc *s3.Client, b
 // buildAndStage is phase 2: strategy detection + (for non-compose
 // strategies) the actual `docker build` / `pack build`. For compose
 // it's a near-no-op since `compose up --build` does the work
-// inline. Until Tasks 6/7 land, non-compose strategies fail fast
-// here so the live stack is preserved.
-func buildAndStage(ctx context.Context, log *slog.Logger, staging string, pushPhase pushPhaseFunc) (build.Strategy, error) {
+// inline.
+//
+// Non-compose strategies build the image, inspect it for an EXPOSE
+// declaration (Dockerfile path), then synthesize a compose file at
+// .lightsail/compose.generated.yml inside staging so the swap step
+// can drive `compose up -d` without caring how the image got built.
+//
+// imageTagFor derives a stable per-deploy tag from the deploy key,
+// so successive deploys produce ls-<app>-<env>:<sha> images we can
+// dangling-prune without touching unrelated user images.
+func buildAndStage(ctx context.Context, log *slog.Logger, staging, deployKey string, pushPhase pushPhaseFunc) (build.Strategy, error) {
 	pushPhase("detecting")
 	strategy, reason, derr := build.Detect(staging)
 	if derr != nil {
@@ -423,12 +449,117 @@ func buildAndStage(ctx context.Context, log *slog.Logger, staging string, pushPh
 	case build.StrategyCompose:
 		// compose's own up --build runs the build inline during swap.
 		return strategy, nil
+	case build.StrategyDockerfile:
+		return strategy, buildDockerfile(ctx, log, staging, imageTagFor(deployKey), pushPhase)
 	default:
 		return strategy, fmt.Errorf(
-			"build strategy %q (%s) is recognized but not yet implemented in the agent — "+
-				"this watcher only supports compose deploys for now",
+			"build strategy %q (%s) is recognized but not yet implemented in the agent",
 			strategy.String(), reason)
 	}
+}
+
+// imageTagFor builds the per-deploy image tag. The deploy key looks
+// like "deploy/<unix>-<sha>.tar.gz"; we use just the sha (or the
+// full base name as a fallback) so successive deploys produce
+// stable, predictable tags.
+func imageTagFor(deployKey string) string {
+	base := deployKey
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	base = strings.TrimSuffix(base, ".tar.gz")
+	// Strip the unix-prefix if present so the tag ends in the SHA.
+	if i := strings.Index(base, "-"); i > 0 {
+		base = base[i+1:]
+	}
+	if base == "" {
+		base = "latest"
+	}
+	return "lightsail-app:" + base
+}
+
+// buildDockerfile runs `docker build` against the staging dir,
+// inspects the resulting image for an EXPOSE port (defaulting to
+// 8080), and writes .lightsail/compose.generated.yml so the swap
+// step has something to bring up.
+func buildDockerfile(ctx context.Context, log *slog.Logger, staging, tag string, pushPhase pushPhaseFunc) error {
+	pushPhase("building")
+	log.InfoContext(ctx, "building image from Dockerfile",
+		slog.String("tag", tag))
+	if err := runCmd(ctx, log, staging, "docker", "build", "-t", tag, "."); err != nil {
+		return fmt.Errorf("docker build: %w", err)
+	}
+	port, perr := inspectExposedPort(ctx, tag)
+	if perr != nil || port == 0 {
+		log.InfoContext(ctx, "no EXPOSE in image; defaulting to 8080",
+			slog.Any("err", perr))
+		port = 8080
+	}
+	log.InfoContext(ctx, "image port resolved",
+		slog.Int("port", port),
+		slog.String("source", inspectSource(perr, port)))
+	return writeSyntheticCompose(staging, tag, port)
+}
+
+// inspectSource is a tiny helper that names where the port came
+// from for the log line. Pure cosmetic.
+func inspectSource(err error, port int) string {
+	if err == nil && port != 8080 {
+		return "image EXPOSE"
+	}
+	if err == nil {
+		return "image EXPOSE or default"
+	}
+	return "default (inspect failed)"
+}
+
+// inspectExposedPort runs `docker inspect` against tag and returns
+// the first declared TCP port from .Config.ExposedPorts, or 0 when
+// none is declared. Errors are surfaced so callers can log them;
+// the caller treats both 0 and error the same way (default to
+// 8080).
+func inspectExposedPort(ctx context.Context, tag string) (int, error) {
+	cmd := exec.CommandContext(ctx, "docker", "inspect",
+		"--format", "{{range $p, $_ := .Config.ExposedPorts}}{{$p}} {{end}}", tag)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, err
+	}
+	// Output looks like "8080/tcp 9090/tcp ". First entry wins.
+	fields := strings.Fields(string(out))
+	for _, f := range fields {
+		num := strings.TrimSuffix(f, "/tcp")
+		// Skip UDP-only entries; we don't auto-publish them.
+		if strings.HasSuffix(f, "/udp") {
+			continue
+		}
+		if p, err := strconv.Atoi(num); err == nil && p > 0 {
+			return p, nil
+		}
+	}
+	return 0, nil
+}
+
+// writeSyntheticCompose emits .lightsail/compose.generated.yml
+// inside staging. findCompose's lookup list includes this path so
+// swap() finds it as a fallback when no user-authored compose file
+// is present.
+func writeSyntheticCompose(staging, tag string, port int) error {
+	dir := filepath.Join(staging, ".lightsail")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir .lightsail: %w", err)
+	}
+	body := fmt.Sprintf(`# generated by lightsailctl watch — do not edit
+services:
+  app:
+    image: %q
+    ports:
+      - "%d:%d"
+    environment:
+      PORT: "%d"
+    restart: unless-stopped
+`, tag, port, port, port)
+	return os.WriteFile(filepath.Join(dir, "compose.generated.yml"), []byte(body), 0o644)
 }
 
 // swap is phase 3: stop the old stack, atomically replace
@@ -647,7 +778,13 @@ func containerInfo(currentDir string) ([]lightsail.ContainerStatus, []string) {
 }
 
 func findCompose(dir string) string {
-	for _, n := range []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"} {
+	for _, n := range []string{
+		"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+		// Fallback: the synthetic compose file the agent writes
+		// for Dockerfile / buildpack strategies. Listed last so
+		// a user-authored compose file always wins.
+		".lightsail/compose.generated.yml",
+	} {
 		p := filepath.Join(dir, n)
 		if _, err := os.Stat(p); err == nil {
 			return p

@@ -1,11 +1,13 @@
 package watch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/aws/lightsailctl/pkg/build"
@@ -21,7 +23,7 @@ func TestBuildAndStage_Compose(t *testing.T) {
 	}
 	log := slog.New(slog.DiscardHandler)
 	noPush := func(string) {}
-	strategy, err := buildAndStage(context.Background(), log, staging, noPush)
+	strategy, err := buildAndStage(context.Background(), log, staging, "deploy/123-abc.tar.gz", noPush)
 	if err != nil {
 		t.Fatalf("buildAndStage: %v", err)
 	}
@@ -41,7 +43,7 @@ func TestBuildAndStage_BuildpackNotImplemented(t *testing.T) {
 	}
 	log := slog.New(slog.DiscardHandler)
 	noPush := func(string) {}
-	_, err := buildAndStage(context.Background(), log, staging, noPush)
+	_, err := buildAndStage(context.Background(), log, staging, "deploy/123-abc.tar.gz", noPush)
 	if err == nil {
 		t.Fatalf("want error for unimplemented strategy, got nil")
 	}
@@ -51,9 +53,65 @@ func TestBuildAndStage_BuildpackNotImplemented(t *testing.T) {
 func TestBuildAndStage_Unknown(t *testing.T) {
 	staging := t.TempDir()
 	log := slog.New(slog.DiscardHandler)
-	_, err := buildAndStage(context.Background(), log, staging, func(string) {})
+	_, err := buildAndStage(context.Background(), log, staging, "deploy/123-abc.tar.gz", func(string) {})
 	if err == nil {
 		t.Fatalf("want error for unknown tree, got nil")
+	}
+}
+
+// TestImageTagFor: deploy keys produce stable tags ending in the
+// SHA so images can be deterministically pruned by their dangling
+// status without colliding with unrelated user images.
+func TestImageTagFor(t *testing.T) {
+	cases := map[string]string{
+		"deploy/1714000000-abc1234.tar.gz": "lightsail-app:abc1234",
+		"deploy/abc1234.tar.gz":            "lightsail-app:abc1234",
+		"":                                 "lightsail-app:latest",
+	}
+	for in, want := range cases {
+		if got := imageTagFor(in); got != want {
+			t.Errorf("imageTagFor(%q) = %q; want %q", in, got, want)
+		}
+	}
+}
+
+// TestWriteSyntheticCompose: the file lands at the expected path
+// and findCompose picks it up as a fallback.
+func TestWriteSyntheticCompose(t *testing.T) {
+	staging := t.TempDir()
+	if err := writeSyntheticCompose(staging, "lightsail-app:abc", 3000); err != nil {
+		t.Fatalf("writeSyntheticCompose: %v", err)
+	}
+	cf := findCompose(staging)
+	if cf == "" {
+		t.Fatalf("findCompose did not pick up the synthetic file")
+	}
+	body, err := os.ReadFile(cf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"lightsail-app:abc"`, `"3000:3000"`, `PORT: "3000"`} {
+		if !bytes.Contains(body, []byte(want)) {
+			t.Errorf("missing %q in generated compose:\n%s", want, body)
+		}
+	}
+}
+
+// TestFindCompose_UserAuthoredWinsOverSynthetic: a user-authored
+// docker-compose.yml takes precedence over the synthetic file the
+// agent writes. This means a user can drop a compose file next to
+// their Dockerfile to override the auto-generated one.
+func TestFindCompose_UserAuthoredWinsOverSynthetic(t *testing.T) {
+	staging := t.TempDir()
+	if err := writeSyntheticCompose(staging, "lightsail-app:abc", 3000); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "docker-compose.yml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cf := findCompose(staging)
+	if !strings.HasSuffix(cf, "docker-compose.yml") {
+		t.Errorf("findCompose = %q; want user-authored docker-compose.yml to win", cf)
 	}
 }
 
