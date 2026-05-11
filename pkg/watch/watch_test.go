@@ -3,7 +3,6 @@ package watch
 import (
 	"bytes"
 	"context"
-	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -23,7 +22,7 @@ func TestBuildAndStage_Compose(t *testing.T) {
 	}
 	log := slog.New(slog.DiscardHandler)
 	noPush := func(string) {}
-	strategy, err := buildAndStage(context.Background(), log, staging, "deploy/123-abc.tar.gz", noPush)
+	strategy, err := buildAndStage(context.Background(), log, staging, "deploy/123-abc.tar.gz", "myapp", "dev", noPush)
 	if err != nil {
 		t.Fatalf("buildAndStage: %v", err)
 	}
@@ -32,30 +31,29 @@ func TestBuildAndStage_Compose(t *testing.T) {
 	}
 }
 
-// TestBuildAndStage_BuildpackNotImplemented: a recognized non-compose
-// strategy returns a clear error rather than silently failing or
-// proceeding into swap. This is what protects the live stack from
-// being torn down by an unimplemented build path.
-func TestBuildAndStage_BuildpackNotImplemented(t *testing.T) {
-	staging := t.TempDir()
-	if err := os.WriteFile(filepath.Join(staging, "go.mod"), []byte("module x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	log := slog.New(slog.DiscardHandler)
-	noPush := func(string) {}
-	_, err := buildAndStage(context.Background(), log, staging, "deploy/123-abc.tar.gz", noPush)
-	if err == nil {
-		t.Fatalf("want error for unimplemented strategy, got nil")
-	}
-}
-
 // TestBuildAndStage_Unknown: unknown source tree errors out.
 func TestBuildAndStage_Unknown(t *testing.T) {
 	staging := t.TempDir()
 	log := slog.New(slog.DiscardHandler)
-	_, err := buildAndStage(context.Background(), log, staging, "deploy/123-abc.tar.gz", func(string) {})
+	_, err := buildAndStage(context.Background(), log, staging, "deploy/123-abc.tar.gz", "myapp", "dev", func(string) {})
 	if err == nil {
 		t.Fatalf("want error for unknown tree, got nil")
+	}
+}
+
+// TestBuildpackCacheName: stable, app/env-scoped, safe defaults.
+func TestBuildpackCacheName(t *testing.T) {
+	cases := []struct {
+		app, env, want string
+	}{
+		{"hello", "dev", "lightsail-buildpack-cache-hello-dev"},
+		{"hello", "", "lightsail-buildpack-cache-hello-default"},
+		{"", "", "lightsail-buildpack-cache-default-default"},
+	}
+	for _, tc := range cases {
+		if got := buildpackCacheName(tc.app, tc.env); got != tc.want {
+			t.Errorf("buildpackCacheName(%q,%q) = %q; want %q", tc.app, tc.env, got, tc.want)
+		}
 	}
 }
 
@@ -148,14 +146,3 @@ func TestSetPhase_NilSafe(t *testing.T) {
 	setPhase(nil, "downloading")
 }
 
-// errString returns the message of err or "<nil>".
-func errString(err error) string {
-	if err == nil {
-		return "<nil>"
-	}
-	var pErr *os.PathError
-	if errors.As(err, &pErr) {
-		return pErr.Error()
-	}
-	return err.Error()
-}

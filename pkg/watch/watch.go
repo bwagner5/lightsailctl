@@ -190,7 +190,7 @@ func Run(ctx context.Context, opts Options) error {
 					slog.Any("err", err))
 			}
 		}
-		if derr := pullAndApply(ctx, log, svc, bucket, latest, baseDir, currentDir, pushPhase); derr != nil {
+		if derr := pullAndApply(ctx, log, svc, bucket, latest, baseDir, currentDir, opts.App, opts.Env, pushPhase); derr != nil {
 			log.ErrorContext(ctx, "deployment failed",
 				slog.String("key", latest),
 				slog.Duration("elapsed", time.Since(start)),
@@ -341,12 +341,12 @@ type pushPhaseFunc func(name string)
 //
 // The strategy returned by buildAndStage is consumed by swap so the
 // two callers don't run Detect twice on the same tree.
-func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket, key, baseDir, currentDir string, pushPhase pushPhaseFunc) error {
+func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket, key, baseDir, currentDir, app, env string, pushPhase pushPhaseFunc) error {
 	staging := filepath.Join(baseDir, "staging")
 	if err := downloadAndExtract(ctx, log, svc, bucket, key, baseDir, staging, pushPhase); err != nil {
 		return err
 	}
-	strategy, err := buildAndStage(ctx, log, staging, key, pushPhase)
+	strategy, err := buildAndStage(ctx, log, staging, key, app, env, pushPhase)
 	if err != nil {
 		return err
 	}
@@ -355,7 +355,8 @@ func pullAndApply(ctx context.Context, log *slog.Logger, svc *s3.Client, bucket,
 	}
 	// Best-effort cleanup: drop dangling images left behind by
 	// successive `docker build` / `pack build` runs. Tagged images
-	// (current + previous ls-<app>-<env>:<sha>) survive.
+	// (current + previous ls-<app>-<env>:<sha>) survive, as does
+	// the named buildpack cache volume.
 	pruneDanglingImages(ctx, log, pushPhase)
 	return nil
 }
@@ -436,7 +437,7 @@ func downloadAndExtract(ctx context.Context, log *slog.Logger, svc *s3.Client, b
 // imageTagFor derives a stable per-deploy tag from the deploy key,
 // so successive deploys produce ls-<app>-<env>:<sha> images we can
 // dangling-prune without touching unrelated user images.
-func buildAndStage(ctx context.Context, log *slog.Logger, staging, deployKey string, pushPhase pushPhaseFunc) (build.Strategy, error) {
+func buildAndStage(ctx context.Context, log *slog.Logger, staging, deployKey, app, env string, pushPhase pushPhaseFunc) (build.Strategy, error) {
 	pushPhase("detecting")
 	strategy, reason, derr := build.Detect(staging)
 	if derr != nil {
@@ -451,6 +452,8 @@ func buildAndStage(ctx context.Context, log *slog.Logger, staging, deployKey str
 		return strategy, nil
 	case build.StrategyDockerfile:
 		return strategy, buildDockerfile(ctx, log, staging, imageTagFor(deployKey), pushPhase)
+	case build.StrategyBuildpack:
+		return strategy, buildBuildpack(ctx, log, staging, imageTagFor(deployKey), app, env, pushPhase)
 	default:
 		return strategy, fmt.Errorf(
 			"build strategy %q (%s) is recognized but not yet implemented in the agent",
@@ -538,6 +541,69 @@ func inspectExposedPort(ctx context.Context, tag string) (int, error) {
 		}
 	}
 	return 0, nil
+}
+
+// buildBuildpack runs `pack build` against the staging dir using
+// the official paketo jammy-base builder. The image tag is shared
+// with the Dockerfile path (lightsail-app:<sha>) so the pruning
+// path doesn't need to special-case it.
+//
+// The cache volume (`lightsail-buildpack-cache-<app>-<env>`) is
+// pinned per app/env and reused across deploys. Iterative
+// re-deploys of the same app go from ~90s (full Maven/npm
+// resolve) to seconds because layers stay warm. The volume is
+// not pruned by `docker image prune`.
+//
+// We always pre-pull the builder image first; on freshly-warmed
+// instances (post Task 3 dockerize-remote.sh) it's a no-op, on
+// older instances it pays the ~500 MB pull once. `--trust-builder`
+// is safe for the official Paketo image and avoids the extra
+// lifecycle-runner container.
+func buildBuildpack(ctx context.Context, log *slog.Logger, staging, tag, app, env string, pushPhase pushPhaseFunc) error {
+	const builder = "paketobuildpacks/builder-jammy-base"
+	pushPhase("pulling-builder")
+	log.InfoContext(ctx, "ensuring buildpack builder image is local",
+		slog.String("builder", builder))
+	if err := runCmd(ctx, log, "", "docker", "pull", builder); err != nil {
+		// Pull failure isn't fatal here — `pack build` will pull
+		// the builder itself if it has to. We log and continue so
+		// instances on flaky networks still get a chance.
+		log.WarnContext(ctx, "builder pull failed; pack build will retry inline",
+			slog.Any("err", err))
+	}
+
+	pushPhase("building")
+	cache := buildpackCacheName(app, env)
+	log.InfoContext(ctx, "building image via Cloud Native Buildpacks",
+		slog.String("tag", tag),
+		slog.String("builder", builder),
+		slog.String("cache", cache))
+	if err := runCmd(ctx, log, staging, "pack", "build", tag,
+		"--builder", builder,
+		"--path", ".",
+		"--trust-builder",
+		"--cache", "type=volume;name="+cache,
+	); err != nil {
+		return fmt.Errorf("pack build: %w", err)
+	}
+	// Buildpack run images default to PORT=8080; no `docker
+	// inspect` needed. Users who need a different port write a
+	// compose file.
+	return writeSyntheticCompose(staging, tag, 8080)
+}
+
+// buildpackCacheName returns the docker volume name used as the
+// per-app/env build cache. Stable across deploys so layers stay
+// warm; safe to share across deploys because `pack` namespaces
+// per-image inside the volume.
+func buildpackCacheName(app, env string) string {
+	if app == "" {
+		app = "default"
+	}
+	if env == "" {
+		env = "default"
+	}
+	return fmt.Sprintf("lightsail-buildpack-cache-%s-%s", app, env)
 }
 
 // writeSyntheticCompose emits .lightsail/compose.generated.yml
