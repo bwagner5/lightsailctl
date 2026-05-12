@@ -24,6 +24,7 @@ import (
 	"github.com/bwagner5/triad/pkg/trace"
 	"github.com/bwagner5/triad/pkg/ui/cli"
 	"github.com/bwagner5/triad/pkg/ui/tui"
+	"github.com/bwagner5/triad/pkg/ui/wizardstate"
 	"github.com/spf13/cobra"
 
 	"github.com/aws/lightsailctl/internal"
@@ -87,8 +88,22 @@ func Run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	}
 	logFile := getenv(cli.FlagToEnvVar(cliName, "log-file"))
 
-	g := &cli.Globals{Getenv: getenv}
 	reg := registry.New()
+	tuiOpts := tui.Options{
+		Name:      cliName,
+		Version:   internal.Version().String(),
+		Context:   app.ContextLabel(&region),
+		GlobalOps: []registry.Operation{app.RegionSwitchOp(&region)},
+	}
+	g := &cli.Globals{
+		Getenv: getenv,
+		// Ctrl+T from the inline CLI wizard hands the partially-filled
+		// state off here; we relaunch as the full TUI with the wizard
+		// overlay pre-populated, and the saga runs inside the TUI.
+		SwitchToTUI: func(ctx context.Context, res *registry.Resource, op *registry.Operation, state *wizardstate.State) error {
+			return tui.RunWith(ctx, reg, tuiOpts, res, op, state)
+		},
+	}
 	// Pass &g.NonInteractive so the deploy saga's first-run "offer CI"
 	// tail step can skip itself under -y. See ResourceWithOptions.
 	reg.Register(app.ResourceWithOptions(&region, regionHints, &g.NonInteractive))
@@ -165,12 +180,7 @@ func Run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	}
 
 	runTUI := func(cmd *cobra.Command, _ []string) error {
-		return tui.Run(cmd.Context(), reg, tui.Options{
-			Name:      cliName,
-			Version:   internal.Version().String(),
-			Context:   app.ContextLabel(&region),
-			GlobalOps: []registry.Operation{app.RegionSwitchOp(&region)},
-		})
+		return tui.Run(cmd.Context(), reg, tuiOpts)
 	}
 	root.RunE = runTUI
 	root.AddCommand(&cobra.Command{
