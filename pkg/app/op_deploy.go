@@ -50,9 +50,11 @@ func deployOp(s *store) registry.Operation {
 	// filter appropriately. Reallocated per call to deployOp so the
 	// closure state isn't shared across invocations.
 	var (
-		niStore    = instance.NewStore(s.region, s.regionHints)
-		niBpType   = "os"
-		niPlatform = "LINUX_UNIX"
+		niStore       = instance.NewStore(s.region, s.regionHints)
+		niBpType      = "os"
+		niPlatform    = "LINUX_UNIX"
+		niBundleCat   = lightsail.BundleCategoryGeneralPurpose
+		niIPType      = "dualstack"
 	)
 	niBpSuggest, niBpValidate := niBlueprintSuggestAndValidate(niStore, &niBpType, &niPlatform)
 
@@ -122,13 +124,19 @@ func deployOp(s *store) registry.Operation {
 			{Flag: "__ni/blueprint", Label: "Blueprint", Help: "OS / image",
 				Section: "New Lightsail Instance", Required: true, When: wantsNew,
 				Default: "amazon_linux_2023", Suggest: niBpSuggest, Validate: niBpValidate},
-			{Flag: "__ni/bundle", Label: "Instance size", Help: "instance size",
-				Section: "New Lightsail Instance", Required: true, When: wantsNew,
-				Default: "micro_x_x", Suggest: niBundleSuggest(niStore, &niPlatform)},
 			{Flag: "__ni/ip-address-type", Label: "Networking",
 				Help: "networking stack", Default: "dualstack",
 				Section: "New Lightsail Instance", When: wantsNew,
-				Suggest: niIPTypeSuggest()},
+				Suggest:  niIPTypeSuggest(),
+				Validate: func(v string) error { niIPType = v; return nil }},
+			{Flag: "__ni/bundle-category", Label: "Instance category", Help: "instance category",
+				Section: "New Lightsail Instance", When: wantsNew,
+				Default: lightsail.BundleCategoryGeneralPurpose,
+				Suggest: niBundleCategorySuggest(),
+				Validate: func(v string) error { niBundleCat = v; return nil }},
+			{Flag: "__ni/bundle", Label: "Instance size", Help: "instance size",
+				Section: "New Lightsail Instance", Required: true, When: wantsNew,
+				Default: "micro_x_x", Suggest: niBundleSuggestFiltered(niStore, &niPlatform, &niBundleCat, &niIPType)},
 			{Flag: "__ni/user-data", Label: "Launch script", Help: "launch script",
 				Section: "New Lightsail Instance", When: wantsNew, File: true},
 			{Flag: "__ni/monitoring", Label: "Detailed monitoring",

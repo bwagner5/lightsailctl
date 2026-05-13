@@ -33,6 +33,8 @@ func createOp(s *Store) registry.Operation {
 func CreateFields(s *Store) []registry.Field {
 	bpType := "os"           // shared: blueprint-type → blueprint filtering
 	platform := "LINUX_UNIX" // shared: blueprint → bundle filtering
+	bundleCat := lightsail.BundleCategoryGeneralPurpose
+	ipType := "dualstack"
 	bpSuggest, bpValidate := BlueprintSuggestAndValidate(s, &bpType, &platform)
 	return []registry.Field{
 		{Flag: "name", Short: "n", Help: "instance name", Required: true,
@@ -52,15 +54,26 @@ func CreateFields(s *Store) []registry.Field {
 			}},
 		{Flag: "blueprint", Short: "b", Help: "OS / image", Required: true,
 			Default: "amazon_linux_2023", Suggest: bpSuggest, Validate: bpValidate},
-		{Flag: "bundle", Help: "instance size", Required: true,
-			Default: "micro_x_x", Suggest: BundleSuggest(s, &platform)},
 		{Flag: "ip-address-type", Help: "networking stack", Default: "dualstack",
 			Suggest: func(_ context.Context) ([]registry.Choice, error) {
 				return []registry.Choice{
 					{Value: "dualstack", Display: "dualstack  IPv4 + IPv6"},
 					{Value: "ipv6", Display: "ipv6       IPv6 only"},
 				}, nil
+			},
+			Validate: func(v string) error {
+				ipType = v
+				return nil
 			}},
+		{Flag: "bundle-category", Help: "instance category",
+			Default: lightsail.BundleCategoryGeneralPurpose,
+			Suggest: BundleCategorySuggest(),
+			Validate: func(v string) error {
+				bundleCat = v
+				return nil
+			}},
+		{Flag: "bundle", Help: "instance size", Required: true,
+			Default: "micro_x_x", Suggest: BundleSuggestFiltered(s, &platform, &bundleCat, &ipType)},
 		{Flag: "user-data", Help: "launch script", File: true},
 		{Flag: "monitoring", Help: "detailed monitoring", Default: "false", Kind: registry.KindBool,
 			Suggest: func(_ context.Context) ([]registry.Choice, error) {
@@ -156,6 +169,10 @@ func BlueprintSuggestAndValidate(s *Store, bpType, platform *string) (func(conte
 }
 
 func BundleSuggest(s *Store, platform *string) func(context.Context) ([]registry.Choice, error) {
+	return BundleSuggestFiltered(s, platform, nil)
+}
+
+func BundleSuggestFiltered(s *Store, platform *string, category *string, ipType ...*string) func(context.Context) ([]registry.Choice, error) {
 	return func(ctx context.Context) ([]registry.Choice, error) {
 		c, err := s.ensure(ctx)
 		if err != nil {
@@ -170,9 +187,64 @@ func BundleSuggest(s *Store, platform *string) func(context.Context) ([]registry
 			return nil, err
 		}
 		plat := *platform
+		cat := ""
+		if category != nil {
+			cat = *category
+		}
+		ip := ""
+		if len(ipType) > 0 && ipType[0] != nil {
+			ip = *ipType[0]
+		}
+
+		// When duplicate bundles exist at different price points for
+		// the same specs (vCPU+RAM+Disk), the cheaper one is the
+		// IPv6-only variant. Build a set of the cheaper IDs so we can
+		// filter by networking choice.
+		type specKey struct {
+			VCPUs int32
+			RAM   float32
+			Disk  int32
+			Cat   string
+		}
+		cheaperIDs := map[string]bool{}
+		if ip != "" {
+			best := map[specKey]lightsail.Bundle{}
+			worst := map[specKey]lightsail.Bundle{}
+			for _, b := range bundles {
+				if plat != "" && !containsPlatform(b.Platforms, plat) {
+					continue
+				}
+				k := specKey{b.VCPUs, b.RAM, b.Disk, b.Category()}
+				if prev, ok := best[k]; !ok || b.Price < prev.Price {
+					if ok {
+						worst[k] = prev
+					}
+					best[k] = b
+				} else if _, ok := worst[k]; !ok || b.Price > worst[k].Price {
+					worst[k] = b
+				}
+			}
+			for k, b := range best {
+				if _, hasDup := worst[k]; hasDup {
+					cheaperIDs[b.ID] = true
+				}
+			}
+		}
+
 		out := make([]registry.Choice, 0, len(bundles))
 		for _, b := range bundles {
 			if plat != "" && !containsPlatform(b.Platforms, plat) {
+				continue
+			}
+			if cat != "" && b.Category() != cat {
+				continue
+			}
+			// Filter by IP type: ipv6 shows only the cheaper tier,
+			// dualstack shows only the more expensive tier.
+			if ip == "ipv6" && len(cheaperIDs) > 0 && !cheaperIDs[b.ID] {
+				continue
+			}
+			if ip == "dualstack" && cheaperIDs[b.ID] {
 				continue
 			}
 			out = append(out, registry.Choice{
@@ -181,6 +253,17 @@ func BundleSuggest(s *Store, platform *string) func(context.Context) ([]registry
 			})
 		}
 		return out, nil
+	}
+}
+
+// BundleCategorySuggest returns the Suggest function for bundle category selection.
+func BundleCategorySuggest() func(context.Context) ([]registry.Choice, error) {
+	return func(_ context.Context) ([]registry.Choice, error) {
+		return []registry.Choice{
+			{Value: lightsail.BundleCategoryGeneralPurpose, Display: "General Purpose       Best for most workloads (balanced vCPU/RAM)"},
+			{Value: lightsail.BundleCategoryComputeOptimized, Display: "Compute-optimized     High-performance processors (1:2 vCPU:RAM)"},
+			{Value: lightsail.BundleCategoryMemoryOptimized, Display: "Memory-optimized      Memory-intensive workloads (1:8 vCPU:RAM)"},
+		}, nil
 	}
 }
 

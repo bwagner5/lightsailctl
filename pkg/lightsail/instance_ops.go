@@ -118,6 +118,31 @@ type Bundle struct {
 	Platforms []string // e.g. ["LINUX_UNIX"], ["LINUX_UNIX","WINDOWS"]
 }
 
+// Bundle category constants.
+const (
+	BundleCategoryGeneralPurpose    = "general_purpose"
+	BundleCategoryMemoryOptimized   = "memory_optimized"
+	BundleCategoryComputeOptimized  = "compute_optimized"
+)
+
+// BundleCategory classifies a bundle by its vCPU-to-RAM ratio.
+//   - Memory-optimized: RAM/vCPU ratio is 8 (e.g. 4 vCPU / 32 GB)
+//   - Compute-optimized: RAM/vCPU ratio is 2 with 4+ vCPUs
+//   - General Purpose: everything else (standard tiers, balanced ratios)
+func (b Bundle) Category() string {
+	if b.VCPUs == 0 {
+		return BundleCategoryGeneralPurpose
+	}
+	ratio := b.RAM / float32(b.VCPUs)
+	if ratio >= 7.5 && ratio <= 8.5 {
+		return BundleCategoryMemoryOptimized
+	}
+	if ratio >= 1.5 && ratio <= 2.5 && b.VCPUs >= 4 {
+		return BundleCategoryComputeOptimized
+	}
+	return BundleCategoryGeneralPurpose
+}
+
 // ListBundles returns active Lightsail bundles.
 func (c *Client) ListBundles(ctx context.Context) ([]Bundle, error) {
 	var out []Bundle

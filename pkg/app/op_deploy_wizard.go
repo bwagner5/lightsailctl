@@ -42,6 +42,16 @@ func niBundleSuggest(s *instance.Store, platform *string) func(context.Context) 
 	return instance.BundleSuggest(s, platform)
 }
 
+// niBundleSuggestFiltered proxies the bundle picker with category and IP type filtering.
+func niBundleSuggestFiltered(s *instance.Store, platform *string, category *string, ipType *string) func(context.Context) ([]registry.Choice, error) {
+	return instance.BundleSuggestFiltered(s, platform, category, ipType)
+}
+
+// niBundleCategorySuggest proxies the bundle category picker.
+func niBundleCategorySuggest() func(context.Context) ([]registry.Choice, error) {
+	return instance.BundleCategorySuggest()
+}
+
 // niBlueprintTypeSuggest returns the two-option picker for the
 // blueprint-type field (os vs app). Static, so it's expressed inline
 // here rather than reaching into pkg/instance.
