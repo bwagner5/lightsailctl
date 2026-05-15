@@ -1,43 +1,37 @@
 # Amazon Lightsail CLI
 
-`lightsailctl` is a first-class CLI and TUI for Amazon Lightsail. It also
-serves as an [AWS CLI extension][lscli] (`aws lightsail push-container-image`
-shells out to it).
+`lightsailctl` deploys your app — Go, Node, Python, Java, Ruby, .NET,
+PHP, a static site, a `Dockerfile`, or a `docker-compose.yml` — to an
+Amazon Lightsail instance with **one command**. Builds run on the
+instance, so there's no Docker, buildx, or cross-compile setup on your
+laptop.
 
-## Two faces
-
-**1. First-class CLI** — deploy a source tree (Go, Node, Python, Java, …) or
-a Docker Compose application to a Lightsail instance with one command:
+## Install
 
 ```sh
-lightsailctl deploy                 # deploy current dir to an app/env
-lightsailctl                        # launch the TUI dashboard
-lightsailctl app list               # list applications
-lightsailctl app status --name foo  # show health + endpoints
-lightsailctl app logs --name foo    # tail docker compose logs over SSH
-lightsailctl app delete --name foo  # tear down (buckets, tags, firewall)
-lightsailctl app --help             # everything else
+brew install aws/tap/lightsailctl
 ```
 
-Every command missing a required flag launches an inline wizard (suppress
-with `-y` for CI).
+## Deploy
 
-## Zero-config deploy
+```sh
+lightsailctl deploy
+```
 
-`lightsailctl deploy` figures out how to build your project on its own. It
-inspects the working directory and picks one of three strategies:
+Any command run without required flags drops into an interactive
+wizard — pass `-y` in CI to disable it.
 
-| What it finds | What happens |
+## What it builds
+
+`lightsailctl deploy` looks at your project and picks a strategy:
+
+| It finds | It runs |
 |---|---|
-| `docker-compose.yml` | `docker compose up --build -d` on the instance |
-| `Dockerfile` | `docker build` on the instance, port from `EXPOSE` (defaults to 8080) |
-| `go.mod` / `package.json` / `requirements.txt` / `pyproject.toml` / `pom.xml` / `build.gradle[.kts]` / `*.csproj` / `Gemfile` / `composer.json` / `index.html` | `pack build` on the instance via Cloud Native Buildpacks (paketo-jammy-base) |
+| `docker-compose.yml` | `docker compose up --build -d` |
+| `Dockerfile` | `docker build` (port from `EXPOSE`, default 8080) |
+| `go.mod`, `package.json`, `requirements.txt`, `pom.xml`, `Gemfile`, `*.csproj`, `index.html`, … | Cloud Native Buildpacks (port 8080) |
 
-Builds run **on the instance**, not locally. The client tars + uploads
-the source tree; the instance pulls, builds, and deploys. No `pack` /
-Docker Buildx / cross-arch pain on your laptop.
-
-The deploy review screen names the strategy before you confirm:
+You'll see the chosen strategy before each deploy:
 
 ```
 Build strategy
@@ -46,21 +40,95 @@ Build strategy
   Note      no Dockerfile needed — built on the instance
 ```
 
-### Caveats
+## `lightsail.conf`
 
-- **OOM on nano/micro.** Buildpack builds need ~1 GB of free memory.
-  Deploys on `nano_*` / `micro_*` bundles may OOM during build; size up
-  or supply a Dockerfile.
-- **Port defaults.** Buildpacks listen on 8080; Dockerfile reads the
-  first `EXPOSE`. If you need a different port, drop a
-  `docker-compose.yml` next to your code — it always wins.
-- **Layer cache.** Successive deploys of the same app reuse a per-app
-  buildpack cache volume (`lightsail-buildpack-cache-<app>-<env>`) so
-  the second deploy lands in seconds. Wipe it manually with
-  `docker volume rm lightsail-buildpack-cache-<app>-<env>` if you need
-  a clean rebuild.
+One YAML file per project, written on first `deploy`:
 
-**2. AWS-CLI plugin** — invoked automatically by the AWS CLI:
+```yaml
+app: my-web-app
+env: dev
+region: us-east-2
+ignore:          # extra paths excluded from the deploy tarball
+  - .venv
+  - target
+```
+
+## App Commands
+
+```sh
+lightsailctl app  manage Lightsail Applications
+
+USAGE
+  lightsailctl app [flags]
+
+COMMANDS
+  add-target         add an instance as a deployment target
+  create             create a new Lightsail application
+  delete             delete an app and all its buckets
+  deploy             deploy current dir to an app/env
+  disable-gh-action  remove the GitHub Actions deploy workflow and its IAM role
+  enable-gh-action   set up a GitHub Actions deploy workflow for this app
+  get                get one app
+  list               list apps
+  local              [instance] commands invoked over SSH by the client
+  logs               tail docker compose logs on a target
+  remove-target      remove an instance from deployment targets
+
+GLOBAL FLAGS
+        --debug             enable trace logging (flips the global level threshold to TRACE) [$LIGHTSAILCTL_DEBUG]
+    -h, --help              help for this command
+        --log-dest string   log sink: file (default) | stderr | none [$LIGHTSAILCTL_LOG_DEST] (default "file")
+        --log-file string   override the default log path (only when --log-dest=file; retention not applied) [$LIGHTSAILCTL_LOG_FILE]
+    -y, --no-interactive    disable interactive prompts and live progress (for CI / scripts) [$LIGHTSAILCTL_NO_INTERACTIVE]
+    -o, --output string     output: short|wide|yaml|json [$LIGHTSAILCTL_OUTPUT] (default "short")
+        --region string     AWS region (blank = query all regions) [$LIGHTSAILCTL_REGION]
+        --verbose           verbose output [$LIGHTSAILCTL_VERBOSE]
+```
+
+## Instance Commands
+
+```sh
+lightsailctl instance  manage Lightsail instances
+
+USAGE
+  lightsailctl instance [flags]
+
+COMMANDS
+  create    create a new Lightsail instance
+  delete    delete a Lightsail instance
+  firewall  update instance firewall rules
+  get       get one instance
+  list      list instances
+  ssh       SSH to an instance
+  start     start a stopped instance
+  stop      stop a running instance
+
+GLOBAL FLAGS
+        --debug             enable trace logging (flips the global level threshold to TRACE) [$LIGHTSAILCTL_DEBUG]
+    -h, --help              help for this command
+        --log-dest string   log sink: file (default) | stderr | none [$LIGHTSAILCTL_LOG_DEST] (default "file")
+        --log-file string   override the default log path (only when --log-dest=file; retention not applied) [$LIGHTSAILCTL_LOG_FILE]
+    -y, --no-interactive    disable interactive prompts and live progress (for CI / scripts) [$LIGHTSAILCTL_NO_INTERACTIVE]
+    -o, --output string     output: short|wide|yaml|json [$LIGHTSAILCTL_OUTPUT] (default "short")
+        --region string     AWS region (blank = query all regions) [$LIGHTSAILCTL_REGION]
+        --verbose           verbose output [$LIGHTSAILCTL_VERBOSE]
+```
+
+---
+
+## AWS CLI plugin (separate use case)
+
+`lightsailctl` is also the binary that the AWS CLI shells out to for
+`aws lightsail push-container-image`. You don't run this directly —
+the AWS CLI does. This section documents that contract for
+troubleshooting and Windows installs.
+
+### Windows install
+
+For Windows, follow [Install Docker, AWS CLI, and the Lightsail Control
+plugin for containers][win].
+
+### Plugin contract
 
 ```sh
 $ lightsailctl --plugin -h
@@ -71,173 +139,18 @@ Usage of `lightsailctl --plugin`:
         receive plugin payload on stdin
 ```
 
-## Applications
+### Under the hood
 
-A Lightsail Application is a client-side aggregate over Lightsail buckets and
-instances. The model lives entirely in this CLI:
-
-- **Buckets.** One app-config bucket `ls--<acct>--<app>` plus one env bucket
-  per environment `ls--<acct>--<app>--<env>`. Deploy tarballs land in
-  `s3://<env-bucket>/deploy/<unix>-<sha>.tar.gz`.
-- **Instance tags.** Target instances are marked with `ls:app:<app>:<env> =
-  true`.
-- **Status files.** The on-instance watcher writes
-  `<instance>_status.json` to the env bucket on every deploy or every minute,
-  whichever comes first.
-- **On-instance layout.** `/opt/lightsail/<app>/<env>/current` holds the
-  deployed source; the watcher runs under a systemd unit
-  `lightsail-watch-<app>-<env>.service`.
-
-The watcher binary is `lightsailctl` itself, invoked on the instance as
-`lightsailctl app local watch`. No separate daemon to ship.
-
-## Creating an app
-
-```sh
-lightsailctl app create \
-  --name my-web-app \
-  --env dev \
-  --region us-east-2 \
-  --instance my-lightsail-instance \
-  --agent-path ./dist/lightsailctl_linux_amd64_v1/lightsailctl
-```
-
-`--agent-path` must point at a **linux/amd64** `lightsailctl` binary. Until
-we publish releases, build one locally:
-
-```sh
-GOOS=linux GOARCH=amd64 go build -o /tmp/lightsailctl-linux .
-lightsailctl app create --agent-path /tmp/lightsailctl-linux ...
-```
-
-On success the wizard writes `./lightsail.conf` so subsequent
-`lightsailctl deploy` calls pick up the app/env/region without flags.
-
-## `lightsail.conf`
-
-Minimal YAML, one per project:
-
-```yaml
-app: my-web-app
-env: dev
-region: us-east-2
-ignore:          # paths excluded from the deploy tarball (additive to
-  - .venv        # built-ins: .git, .lightsail, node_modules, .DS_Store)
-  - target
-```
-
-Discovery: `Find()` walks up from the current directory, just like git.
-
-## Logging
-
-`lightsailctl` writes structured, text-formatted logs at `INFO` by default.
-Attach one to a bug report and a reviewer can reconstruct the run.
-
-| Flag | Env | Default | Purpose |
-|---|---|---|---|
-| `--debug` | `LIGHTSAILCTL_DEBUG` | off | flip the threshold from `INFO` to `TRACE` (includes SDK retries) |
-| `--log-dest` | `LIGHTSAILCTL_LOG_DEST` | `file` | sink: `file`, `stderr`, or `none` |
-| `--log-file` | `LIGHTSAILCTL_LOG_FILE` | _auto_ | override path when `--log-dest=file` (no retention on user-supplied paths) |
-
-Default log location: `$HOME/.lightsailctl/logs/<UTC-ts>-<pid>.log`. The
-file is created lazily on the first record, and the directory is pruned
-at startup (files older than 14 days or beyond the 100-most-recent are
-deleted). Every log line includes `ui=cli|interactive|tui|watch`, the
-cobra command path, and the saga/step context emitted by the runtime.
-
-The on-instance watcher (installed by `app create`) runs under systemd
-with `--log-dest=stderr`; `journalctl -u lightsailctl-<app>-<env>` is the
-support artifact.
-
-## Installing
-
-### Homebrew 🍻
-
-```sh
-brew install aws/tap/lightsailctl
-```
-
-### From Source
-
-`lightsailctl` is written in Go, so please [install Go.][getgo]
-
-If all you want is to install `lightsailctl` binary, then do the following:
-
-```sh
-go install github.com/aws/lightsailctl@latest
-```
-
-> **Note:** the executable is installed in `$HOME/go/bin` on macOS/Linux/Unix
-> and in `%USERPROFILE%\go\bin` on Windows.
-
-Keep reading if you want to work with `lightsailctl` source code locally.
-
-After you clone this repo and open your terminal app in it, you'll be
-able to test and build this code like so:
-
-```sh
-go test ./...
-go install ./...
-```
-
-### Windows
-
-For Windows installation instructions, please see [Install Docker, AWS CLI, and the Lightsail Control plugin for containers](https://docs.aws.amazon.com/lightsail/latest/userguide/amazon-lightsail-install-software.html#install-lightsailctl-on-windows).
-
-## Development
-
-The `Makefile` wraps the common tasks:
-
-```sh
-make tools     # install goreleaser and golangci-lint (one-time)
-make lint      # run golangci-lint
-make test      # run unit tests
-make ci        # lint + test (same as CI)
-make snapshot  # build local release artifacts via goreleaser (dist/)
-make help      # list targets
-```
-
-### Integration test
-
-An end-to-end integration test lives at `test/integ/`. It drives the real
-CLI against real AWS resources (creates a bucket, uploads a deploy, hits the
-deployed endpoint, deletes everything). It requires an existing Lightsail
-instance with Docker installed.
-
-```sh
-GOOS=linux GOARCH=amd64 go build -o /tmp/lightsailctl-linux .
-
-LS_INTEG_INSTANCE=my-inst \
-LS_INTEG_REGION=us-east-2 \
-LS_INTEG_AGENT_PATH=/tmp/lightsailctl-linux \
-  go test -tags=integ -v -timeout=20m ./test/integ/...
-```
-
-The test is gated behind `-tags=integ` so `make ci` ignores it. Each phase
-(`Create`, `Deploy`, `Status`, `Delete`) is a `t.Run` subtest so you can
-target one with e.g. `-run TestEndToEnd/Deploy` after a successful earlier
-run. Set `LS_INTEG_KEEP=1` to skip teardown.
-
-## Under The Hood
-
-Let's consider this command and see what actually happens:
+The AWS CLI command:
 
 ```sh
 aws lightsail push-container-image \
- --service-name hello \
- --image hello-world:latest \
- --label www
+  --service-name hello \
+  --image hello-world:latest \
+  --label www
 ```
 
-The above command pushes a local container image with tag
-`hello-world:latest` to make it available in Lightsail container
-service deployments for service `hello`.
-
-This container image pushing logic requires a number of steps that are
-outsourced from AWS CLI to `lightsailctl`.
-
-Here's a shell invocation of `lightsailctl` that approximates what AWS
-CLI does when the command above is invoked:
+is approximately equivalent to invoking `lightsailctl` like this:
 
 ```sh
 $ echo '{
@@ -250,43 +163,19 @@ $ echo '{
   }
 }' | lightsailctl --plugin --input-stdin
 
-85fcec7ef3ef: Layer already exists 
-3e5288f7a70f: Layer already exists 
-56bc37de0858: Layer already exists 
-1c91bf69a08b: Layer already exists 
-cb42413394c4: Layer already exists 
+85fcec7ef3ef: Layer already exists
 Digest: sha256:0b159cd1ee1203dad901967ac55eee18c24da84ba3be384690304be93538bea8
 Image "hello-world:latest" registered.
 Refer to this image as ":hello.www.73" in deployments.
 ```
 
-## Security Disclosures
+## Contributing & feedback
 
-See [CONTRIBUTING.md](CONTRIBUTING.md#security-issue-notifications) for
-more information.
-
-## Giving Feedback and Contributing
-
-Aside from the security feedback covered above, do you have any
-feedback, bug reports, questions or feature ideas?
-
-You are welcome to write up an [issue][issue] for us.
-
-Please read about [Contributing Guidelines.](CONTRIBUTING.md)
-
-## Releases
-
-Releases are automated: pushing a `v*.*.*` tag triggers
-[`.github/workflows/release.yml`][release], which uses
-[GoReleaser][goreleaser] to cross-compile binaries and attach them to a
-new GitHub release.
-
-## License
+Open an [issue][issue] for bugs or feature ideas. See
+[CONTRIBUTING.md](CONTRIBUTING.md), including the security disclosure
+process.
 
 This project is licensed under the Apache-2.0 License.
 
-[lscli]: https://docs.aws.amazon.com/cli/latest/reference/lightsail/index.html
-[getgo]: https://go.dev/doc/install
+[win]: https://docs.aws.amazon.com/lightsail/latest/userguide/amazon-lightsail-install-software.html#install-lightsailctl-on-windows
 [issue]: https://github.com/aws/lightsailctl/issues/new
-[release]: .github/workflows/release.yml
-[goreleaser]: https://goreleaser.com/
