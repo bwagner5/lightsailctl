@@ -1,20 +1,6 @@
-// Package config reads and writes lightsail.conf — the per-project file that
-// tells `lightsailctl deploy` which Lightsail Application it's targeting.
-//
-// Schema:
-//
-//	app:        cosmic-comet         # application name
-//	env:        dev                  # environment within the app
-//	region:     us-east-2            # AWS region
-//	instance:   my-lightsail-box     # target Lightsail instance
-//	agent-path: /path/to/lightsailctl# linux/amd64 binary to scp on first deploy
-//	ignore:                          # extra paths excluded from the tarball
-//	  - node_modules
-//	  - .venv
-//
-// `ignore` is additive: built-in excludes (.git, .lightsail, node_modules,
-// .DS_Store) are always applied. agent-path is only consulted when the
-// app doesn't yet exist and needs to be created.
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package config
 
 import (

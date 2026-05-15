@@ -1,9 +1,6 @@
-// Package watch runs on the Lightsail instance. It polls the env bucket for
-// new deploy tarballs, applies them via `docker compose`, and writes status
-// back to the bucket for `lightsailctl app status` to consume.
-//
-// Credentials come exclusively from IMDS (SetResourceAccessForBucket grants
-// the instance access to the bucket). No static keys on disk.
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package watch
 
 import (

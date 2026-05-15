@@ -1,10 +1,6 @@
-// Package lightsail is a purpose-built wrapper around the AWS Lightsail SDK
-// for managing Lightsail Applications. It centralizes the awkward parts:
-// eventual-consistency retries, bucket-access-key lifecycle (§4.1 of plan.md),
-// and SSH credential fetching.
-//
-// It is NOT a full replacement for aws-sdk-go-v2 — we only wrap the APIs we
-// actually call from Application operations.
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package lightsail
 
 // Naming prefixes and on-instance paths. See plan.md §8.

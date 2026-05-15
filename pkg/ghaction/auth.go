@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package ghaction
 
 import (
@@ -209,7 +212,7 @@ func RequestDeviceCode(ctx context.Context, clientID, scope string) (DeviceCode,
 // or an error on expiry / denial.
 func PollForToken(ctx context.Context, clientID string, dc DeviceCode, status io.Writer) (string, error) {
 	if status != nil {
-		fmt.Fprintf(status, "To authorize, open %s and enter code: %s\n",
+		_, _ = fmt.Fprintf(status, "To authorize, open %s and enter code: %s\n",
 			dc.VerificationURI, dc.UserCode)
 	}
 	deadline := time.Now().Add(time.Duration(dc.ExpiresIn) * time.Second)

@@ -1,17 +1,6 @@
-// Package testkit provides a test registration and execution framework for
-// lightsailctl integration tests.
-//
-// Tests are plain Go functions that read top-to-bottom like a user session:
-//
-//	func instanceLifecycle(t *testkit.T) {
-//	    name := t.NewName("inst")
-//	    t.CreateInstance(name)
-//	    t.WaitForInstanceRunning(name)
-//	    t.DeleteInstance(name)
-//	}
-//
-// High-level helpers print a live banner before they start and a result
-// line when they finish, so the run never looks hung.
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package testkit
 
 import (

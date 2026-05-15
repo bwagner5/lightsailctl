@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package tests
 
 import "github.com/aws/lightsailctl/pkg/lsctltest/testkit"

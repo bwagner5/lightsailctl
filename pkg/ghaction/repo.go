@@ -1,16 +1,6 @@
-// Package ghaction is the GitHub side of the OIDC-deploy feature.
-//
-// Split from pkg/iamoidc so neither package pulls in the other's
-// dependencies and each is unit-testable without a live client:
-//
-//   - repo.go     — parse `git config remote.origin.url` into
-//     (owner, repo) and reject non-github.com remotes.
-//   - workflow.go — render a ready-to-commit
-//     .github/workflows/lightsail-deploy.yml.
-//   - auth.go     — choose a GitHub token source (gh / env / PAT /
-//     device flow) and hand back an *http.Client ready for go-github.
-//   - client.go   — thin wrapper over the GitHub Repositories API
-//     (read-only; the token only ever reads repo metadata).
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package ghaction
 
 import (

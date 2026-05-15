@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package lightsail
 
 import (
@@ -395,16 +398,18 @@ func writeDiskCache(regs []Region, sourceRegion string) error {
 
 // readSnapshot parses the embedded regions_snapshot.json. It's the
 // build-time record of what GetRegions returned when the release
-// shipped; every binary carries its own copy.
+// shipped; every binary carries its own copy. The snapshot is a bare
+// JSON array of regionJS — no metadata, since the release version
+// already identifies which API revision it captured.
 func readSnapshot() ([]Region, error) {
-	var raw diskCacheJSON
-	if err := json.Unmarshal(regionsSnapshotRaw, &raw); err != nil {
+	var regs []regionJS
+	if err := json.Unmarshal(regionsSnapshotRaw, &regs); err != nil {
 		return nil, fmt.Errorf("parse embedded regions snapshot: %w", err)
 	}
-	if len(raw.Regions) == 0 {
+	if len(regs) == 0 {
 		return nil, errors.New("embedded regions snapshot is empty")
 	}
-	return fromJSONRegions(raw.Regions), nil
+	return fromJSONRegions(regs), nil
 }
 
 func fromJSONRegions(in []regionJS) []Region {

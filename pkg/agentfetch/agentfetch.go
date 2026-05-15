@@ -1,15 +1,6 @@
-// Package agentfetch resolves an on-instance agent binary path.
-//
-// The agent shipped to a Lightsail instance is the linux/amd64 build of
-// `lightsailctl` itself. When the user passes --agent-path, we use that
-// path as-is (historical behavior). When the user does NOT pass
-// --agent-path, we auto-fetch the matching release from GitHub once,
-// cache it under the user's cache dir keyed by version, and reuse it
-// on subsequent deploys.
-//
-// Kept in its own package so pkg/app doesn't grow another coupled
-// network / filesystem surface and the logic is unit-testable in
-// isolation.
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package agentfetch
 
 import (
@@ -120,12 +111,9 @@ func Resolve(ctx context.Context, explicit, version, cacheBase string) (string, 
 
 	url := LinuxAMD64AssetURL(version)
 	if err := downloadAndExtract(ctx, url, target); err != nil {
-		return "", fmt.Errorf("could not obtain a linux/amd64 lightsailctl binary:\n"+
-			"  download: %w\n\n"+
-			"To proceed:\n"+
-			"  • pass --agent-path /path/to/linux/amd64/lightsailctl, OR\n"+
-			"  • build one locally:\n"+
-			"      GOOS=linux GOARCH=amd64 go build -o ./lightsailctl_linux_amd64 .", err)
+		return "", fmt.Errorf("could not obtain a linux/amd64 lightsailctl binary "+
+			"(download: %w); to proceed, pass --agent-path /path/to/linux/amd64/lightsailctl, "+
+			"or build one locally with: GOOS=linux GOARCH=amd64 go build -o ./lightsailctl_linux_amd64", err)
 	}
 	return target, nil
 }

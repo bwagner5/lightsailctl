@@ -1,14 +1,6 @@
-// Package build identifies how a source tree should be turned into a
-// running container. It is the single source of truth for the
-// compose / Dockerfile / buildpack decision and is shared by:
-//
-//   - the client (pre-upload pre-flight) so an unknown source tree
-//     fails fast before tarballing and uploading.
-//   - the on-instance agent (apply time) so the same answer drives
-//     the actual build command.
-//
-// Both callers run the exact same Detect() so the answer can never
-// disagree across the wire.
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package build
 
 import (

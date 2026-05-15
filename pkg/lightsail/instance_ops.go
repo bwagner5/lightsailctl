@@ -1,8 +1,12 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package lightsail
 
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/lightsail"
@@ -114,31 +118,24 @@ type Bundle struct {
 	RAM       float32
 	VCPUs     int32
 	Disk      int32
+	Transfer  int32 // GB per month
 	Price     float32
 	Platforms []string // e.g. ["LINUX_UNIX"], ["LINUX_UNIX","WINDOWS"]
 }
 
 // Bundle category constants.
 const (
-	BundleCategoryGeneralPurpose    = "general_purpose"
-	BundleCategoryMemoryOptimized   = "memory_optimized"
-	BundleCategoryComputeOptimized  = "compute_optimized"
+	BundleCategoryGeneralPurpose   = "general_purpose"
+	BundleCategoryMemoryOptimized  = "memory_optimized"
+	BundleCategoryComputeOptimized = "compute_optimized"
 )
 
-// BundleCategory classifies a bundle by its vCPU-to-RAM ratio.
-//   - Memory-optimized: RAM/vCPU ratio is 8 (e.g. 4 vCPU / 32 GB)
-//   - Compute-optimized: RAM/vCPU ratio is 2 with 4+ vCPUs
-//   - General Purpose: everything else (standard tiers, balanced ratios)
 func (b Bundle) Category() string {
-	if b.VCPUs == 0 {
-		return BundleCategoryGeneralPurpose
-	}
-	ratio := b.RAM / float32(b.VCPUs)
-	if ratio >= 7.5 && ratio <= 8.5 {
-		return BundleCategoryMemoryOptimized
-	}
-	if ratio >= 1.5 && ratio <= 2.5 && b.VCPUs >= 4 {
+	if strings.HasPrefix(b.ID, "c_") {
 		return BundleCategoryComputeOptimized
+	}
+	if strings.HasPrefix(b.ID, "m_") {
+		return BundleCategoryMemoryOptimized
 	}
 	return BundleCategoryGeneralPurpose
 }
@@ -166,6 +163,7 @@ func (c *Client) ListBundles(ctx context.Context) ([]Bundle, error) {
 				RAM:       aws.ToFloat32(b.RamSizeInGb),
 				VCPUs:     aws.ToInt32(b.CpuCount),
 				Disk:      aws.ToInt32(b.DiskSizeInGb),
+				Transfer:  aws.ToInt32(b.TransferPerMonthInGb),
 				Price:     aws.ToFloat32(b.Price),
 				Platforms: platforms,
 			})

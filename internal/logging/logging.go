@@ -197,7 +197,7 @@ func warn(opts Options, format string, args ...any) {
 	if opts.Stderr == nil || opts.UI == "tui" {
 		return
 	}
-	fmt.Fprintf(opts.Stderr, format+"\n", args...)
+	_, _ = fmt.Fprintf(opts.Stderr, format+"\n", args...)
 }
 
 // autoResolvePath returns the default log path and its containing

@@ -1,4 +1,6 @@
-// Package lsctltest is the integration test runner for lightsailctl.
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package lsctltest
 
 import (

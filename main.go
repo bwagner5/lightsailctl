@@ -30,8 +30,8 @@ import (
 	"github.com/aws/lightsailctl/internal"
 	"github.com/aws/lightsailctl/internal/logging"
 	"github.com/aws/lightsailctl/internal/plugin"
-	"github.com/aws/lightsailctl/pkg/app"
-	"github.com/aws/lightsailctl/pkg/instance"
+	"github.com/aws/lightsailctl/pkg/resources/app"
+	"github.com/aws/lightsailctl/pkg/resources/instance"
 )
 
 const cliName = "lightsailctl"
@@ -159,7 +159,7 @@ func Run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		// alt-screen) by overriding --log-dest only if the user opts in.
 		if logging.Dest(logDest) == logging.DestFile && g.Debug {
 			if p := logging.CurrentPath(); p != "" {
-				fmt.Fprintf(cmd.ErrOrStderr(), "trace log: %s\n", p)
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "trace log: %s\n", p)
 			}
 		}
 		return nil
@@ -196,7 +196,7 @@ func Run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		// errors (e.g. List failures) never get printed. The saga
 		// renderer prints its own errors inline, but we still need a
 		// fallback for everything else.
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 	}
 	return err
 }

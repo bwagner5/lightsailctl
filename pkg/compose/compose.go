@@ -1,6 +1,6 @@
-// Package compose parses a subset of docker-compose files — just enough to
-// extract publicly-exposed host ports so we can pre-open the Lightsail
-// firewall during deploy.
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package compose
 
 import (

@@ -1,8 +1,6 @@
-// Package deploy provides the saga steps for shipping a source directory to
-// a Lightsail Application's env bucket.
-//
-// It is split from pkg/app because it needs to be importable by a future
-// promote/rollback op without pulling in the whole app resource model.
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package deploy
 
 import (

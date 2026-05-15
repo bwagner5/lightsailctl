@@ -1,15 +1,6 @@
-// Package output provides a live streaming reporter for lsctltest.
-//
-// Behavior:
-//  1. Prints the resolved config and the list of tests that will run.
-//  2. Streams each step in real time: "▶ <step>" when it starts,
-//     "✅ <step> (elapsed)" or "❌ <step>" when it finishes.
-//  3. Command output from CLI calls is indented and printed inline so the
-//     user can see what the test is actually doing, as it happens.
-//
-// There is one reporter. Earlier revisions had three (detail/summary/json);
-// live streaming is what integ tests need, and the alternatives were either
-// incomplete (JSON was a no-op for live events) or redundant with it.
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package output
 
 import (
@@ -42,38 +33,38 @@ type Stream struct {
 // Plan prints the config and the list of tests to be run.
 func (s *Stream) Plan(env testkit.Env, tests []testkit.RegisteredTest) {
 	w := s.W
-	fmt.Fprintf(w, "\n%s%slsctltest%s\n", bold, blue, reset)
-	fmt.Fprintf(w, "  %sbinary%s        %s\n", dim, reset, env.Binary)
-	fmt.Fprintf(w, "  %sbinary-agent%s  %s\n", dim, reset, env.BinaryAgent)
-	fmt.Fprintf(w, "  %sregion%s        %s\n", dim, reset, env.Region)
-	fmt.Fprintf(w, "  %sbundle%s        %s\n", dim, reset, env.Bundle)
+	_, _ = fmt.Fprintf(w, "\n%s%slsctltest%s\n", bold, blue, reset)
+	_, _ = fmt.Fprintf(w, "  %sbinary%s        %s\n", dim, reset, env.Binary)
+	_, _ = fmt.Fprintf(w, "  %sbinary-agent%s  %s\n", dim, reset, env.BinaryAgent)
+	_, _ = fmt.Fprintf(w, "  %sregion%s        %s\n", dim, reset, env.Region)
+	_, _ = fmt.Fprintf(w, "  %sbundle%s        %s\n", dim, reset, env.Bundle)
 	if env.UserData != "" {
-		fmt.Fprintf(w, "  %suser-data%s     %s\n", dim, reset, env.UserData)
+		_, _ = fmt.Fprintf(w, "  %suser-data%s     %s\n", dim, reset, env.UserData)
 	}
-	fmt.Fprintf(w, "  %skeep%s          %v\n", dim, reset, env.Keep)
-	fmt.Fprintf(w, "  %sdry-run%s       %v\n", dim, reset, env.DryRun)
-	fmt.Fprintf(w, "  %sverbose%s       %v\n", dim, reset, env.Verbose)
-	fmt.Fprintf(w, "  %stests%s         %d\n\n", dim, reset, len(tests))
+	_, _ = fmt.Fprintf(w, "  %skeep%s          %v\n", dim, reset, env.Keep)
+	_, _ = fmt.Fprintf(w, "  %sdry-run%s       %v\n", dim, reset, env.DryRun)
+	_, _ = fmt.Fprintf(w, "  %sverbose%s       %v\n", dim, reset, env.Verbose)
+	_, _ = fmt.Fprintf(w, "  %stests%s         %d\n\n", dim, reset, len(tests))
 
-	fmt.Fprintf(w, "%s%sTests%s\n", bold, yellow, reset)
+	_, _ = fmt.Fprintf(w, "%s%sTests%s\n", bold, yellow, reset)
 	for i, rt := range tests {
-		fmt.Fprintf(w, "  %s%d.%s %s%s%s\n", dim, i+1, reset, bold, rt.Name, reset)
+		_, _ = fmt.Fprintf(w, "  %s%d.%s %s%s%s\n", dim, i+1, reset, bold, rt.Name, reset)
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 }
 
 // TestStart prints a banner for a starting test.
 func (s *Stream) TestStart(name string) {
-	fmt.Fprintf(s.W, "\n%s%s=== %s ===%s\n", bold, blue, name, reset)
+	_, _ = fmt.Fprintf(s.W, "\n%s%s=== %s ===%s\n", bold, blue, name, reset)
 }
 
 // StepStart announces a step as it begins, before any work has happened.
 // This is the key improvement: the user sees "▶ creating instance foo"
 // with the full command _before_ the long wait starts.
 func (s *Stream) StepStart(name, cmd string) {
-	fmt.Fprintf(s.W, "\n%s▶ %s%s\n", cyan, name, reset)
+	_, _ = fmt.Fprintf(s.W, "\n%s▶ %s%s\n", cyan, name, reset)
 	if cmd != "" {
-		fmt.Fprintf(s.W, "  %s$ %s%s\n", dim, cmd, reset)
+		_, _ = fmt.Fprintf(s.W, "  %s$ %s%s\n", dim, cmd, reset)
 	}
 }
 
@@ -85,10 +76,10 @@ func (s *Stream) StepDone(step testkit.Step) {
 		indentLines(s.W, step.Output, "    ")
 	}
 	if step.Err != nil {
-		fmt.Fprintf(s.W, "%s❌ %s: %v%s\n", red, step.Name, step.Err, reset)
+		_, _ = fmt.Fprintf(s.W, "%s❌ %s: %v%s\n", red, step.Name, step.Err, reset)
 		return
 	}
-	fmt.Fprintf(s.W, "%s✅ %s%s %s(%s)%s\n",
+	_, _ = fmt.Fprintf(s.W, "%s✅ %s%s %s(%s)%s\n",
 		green, step.Name, reset,
 		dim, roundDur(step.Elapsed), reset)
 }
@@ -96,13 +87,13 @@ func (s *Stream) StepDone(step testkit.Step) {
 // TestDone prints a per-test summary line.
 func (s *Stream) TestDone(r testkit.Result) {
 	if r.Passed {
-		fmt.Fprintf(s.W, "\n%s%s=== %s PASSED (%s) ===%s\n",
+		_, _ = fmt.Fprintf(s.W, "\n%s%s=== %s PASSED (%s) ===%s\n",
 			bold, green, r.Name, roundDur(r.Elapsed), reset)
 		return
 	}
-	fmt.Fprintf(s.W, "\n%s%s=== %s FAILED ===%s\n", bold, red, r.Name, reset)
+	_, _ = fmt.Fprintf(s.W, "\n%s%s=== %s FAILED ===%s\n", bold, red, r.Name, reset)
 	if r.FailMsg != "" {
-		fmt.Fprintf(s.W, "%s%s%s\n", red, r.FailMsg, reset)
+		_, _ = fmt.Fprintf(s.W, "%s%s%s\n", red, r.FailMsg, reset)
 	}
 }
 
@@ -120,7 +111,7 @@ func (s *Stream) Summary(results []testkit.Result) {
 	if failed > 0 {
 		color = red
 	}
-	fmt.Fprintf(s.W, "\n%s%s%d passed, %d failed%s\n",
+	_, _ = fmt.Fprintf(s.W, "\n%s%s%d passed, %d failed%s\n",
 		bold, color, passed, failed, reset)
 }
 
@@ -129,17 +120,17 @@ func (s *Stream) Summary(results []testkit.Result) {
 // the primary step stream.
 func (s *Stream) Debug(name, cmd, output string, err error) {
 	w := s.W
-	fmt.Fprintf(w, "%s  · %s\n", dim, name)
+	_, _ = fmt.Fprintf(w, "%s  · %s\n", dim, name)
 	if cmd != "" {
-		fmt.Fprintf(w, "    $ %s\n", cmd)
+		_, _ = fmt.Fprintf(w, "    $ %s\n", cmd)
 	}
 	if output != "" {
 		indentLines(w, strings.TrimRight(output, "\n"), "      ")
 	}
 	if err != nil {
-		fmt.Fprintf(w, "    err: %v\n", err)
+		_, _ = fmt.Fprintf(w, "    err: %v\n", err)
 	}
-	fmt.Fprint(w, reset)
+	_, _ = fmt.Fprint(w, reset)
 }
 
 // indentLines writes text to w with each line prefixed by `prefix`.
@@ -149,7 +140,7 @@ func indentLines(w io.Writer, text, prefix string) {
 	// Allow very long output lines (default scanner buffer is 64k).
 	sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
 	for sc.Scan() {
-		fmt.Fprintf(w, "%s%s\n", prefix, sc.Text())
+		_, _ = fmt.Fprintf(w, "%s%s\n", prefix, sc.Text())
 	}
 }
 

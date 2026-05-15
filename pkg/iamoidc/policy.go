@@ -1,19 +1,6 @@
-// Package iamoidc builds the IAM documents and provisions the IAM
-// resources that let a GitHub Actions workflow assume a scoped role via
-// OIDC.
-//
-// The package is intentionally split in half:
-//
-//   - policy.go    — pure functions that produce trust-policy and
-//     permissions-policy JSON. No AWS calls. Unit-testable as golden
-//     strings against canonical inputs.
-//   - provider.go  — idempotent OIDC-provider setup on top of iam.Client.
-//   - role.go      — idempotent role + inline-policy setup.
-//   - teardown.go  — the disable path: detach + delete.
-//
-// Keeping the policy shapes out of the SDK wrappers means `lightsailctl
-// app enable-gh-action --dry-run` can show the user exactly what will
-// land before any AWS SDK import is even initialized.
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package iamoidc
 
 import (

@@ -1,103 +1,98 @@
-{
-  "version": 1,
-  "fetched_at": "2026-04-29T19:58:02Z",
-  "source_region": "us-east-1",
-  "regions": [
-    {
-      "id": "ap-northeast-1",
-      "display_name": "Tokyo",
-      "continent": "AP",
-      "description": "This region is recommended to serve users in Japan"
-    },
-    {
-      "id": "ap-northeast-2",
-      "display_name": "Seoul",
-      "continent": "AP",
-      "description": "This region is recommended to serve users in South Korea"
-    },
-    {
-      "id": "ap-south-1",
-      "display_name": "Mumbai",
-      "continent": "AP",
-      "description": "This region is recommended to serve users in India and southern Asia"
-    },
-    {
-      "id": "ap-southeast-1",
-      "display_name": "Singapore",
-      "continent": "AP",
-      "description": "This region is recommended to serve users in India and Southeast Asia"
-    },
-    {
-      "id": "ap-southeast-2",
-      "display_name": "Sydney",
-      "continent": "AP",
-      "description": "This region is recommended to serve users in Austalia, New Zealand, and the South Pacific"
-    },
-    {
-      "id": "ap-southeast-3",
-      "display_name": "Jakarta",
-      "continent": "AP",
-      "description": "This opt-in Region (Region that is disabled by default) is recommended to serve users in Indonesia and Southeast Asia."
-    },
-    {
-      "id": "ap-southeast-5",
-      "display_name": "Malaysia",
-      "continent": "AP",
-      "description": "This opt-in Region (Region that is disabled by default) is recommended to serve users in Malaysia and Southeast Asia."
-    },
-    {
-      "id": "ca-central-1",
-      "display_name": "Montreal",
-      "continent": "NA",
-      "description": "This region is recommended to serve users in eastern and central Canada"
-    },
-    {
-      "id": "eu-central-1",
-      "display_name": "Frankfurt",
-      "continent": "EU",
-      "description": "This region is recommended to serve users in Europe, the Middle East, and Africa"
-    },
-    {
-      "id": "eu-north-1",
-      "display_name": "Stockholm",
-      "continent": "EU",
-      "description": "This region is recommended to serve users in Stockholm and north Europe"
-    },
-    {
-      "id": "eu-west-1",
-      "display_name": "Ireland",
-      "continent": "EU",
-      "description": "This region is recommended to serve users in Ireland, the United Kingdom, and Iceland"
-    },
-    {
-      "id": "eu-west-2",
-      "display_name": "London",
-      "continent": "EU",
-      "description": "This region is recommended to serve users in Ireland, the United Kingdom, and Iceland"
-    },
-    {
-      "id": "eu-west-3",
-      "display_name": "Paris",
-      "continent": "EU",
-      "description": "This region is recommended to serve users in France and central Europe"
-    },
-    {
-      "id": "us-east-1",
-      "display_name": "Virginia",
-      "continent": "NA",
-      "description": "This region is recommended to serve users in the eastern United States"
-    },
-    {
-      "id": "us-east-2",
-      "display_name": "Ohio",
-      "continent": "NA",
-      "description": "This region is recommended to serve users in the eastern United States"
-    },
-    {
-      "id": "us-west-2",
-      "display_name": "Oregon",
-      "continent": "NA",
-      "description": "This region is recommended to serve users in the northwestern United States, Alaska, and western Canada"
-    }
-  ]
-}
+[
+  {
+    "id": "ap-northeast-1",
+    "display_name": "Tokyo",
+    "continent": "AP",
+    "description": "This region is recommended to serve users in Japan"
+  },
+  {
+    "id": "ap-northeast-2",
+    "display_name": "Seoul",
+    "continent": "AP",
+    "description": "This region is recommended to serve users in South Korea"
+  },
+  {
+    "id": "ap-south-1",
+    "display_name": "Mumbai",
+    "continent": "AP",
+    "description": "This region is recommended to serve users in India and southern Asia"
+  },
+  {
+    "id": "ap-southeast-1",
+    "display_name": "Singapore",
+    "continent": "AP",
+    "description": "This region is recommended to serve users in India and Southeast Asia"
+  },
+  {
+    "id": "ap-southeast-2",
+    "display_name": "Sydney",
+    "continent": "AP",
+    "description": "This region is recommended to serve users in Austalia, New Zealand, and the South Pacific"
+  },
+  {
+    "id": "ap-southeast-3",
+    "display_name": "Jakarta",
+    "continent": "AP",
+    "description": "This opt-in Region (Region that is disabled by default) is recommended to serve users in Indonesia and Southeast Asia."
+  },
+  {
+    "id": "ap-southeast-5",
+    "display_name": "Malaysia",
+    "continent": "AP",
+    "description": "This opt-in Region (Region that is disabled by default) is recommended to serve users in Malaysia and Southeast Asia."
+  },
+  {
+    "id": "ca-central-1",
+    "display_name": "Montreal",
+    "continent": "NA",
+    "description": "This region is recommended to serve users in eastern and central Canada"
+  },
+  {
+    "id": "eu-central-1",
+    "display_name": "Frankfurt",
+    "continent": "EU",
+    "description": "This region is recommended to serve users in Europe, the Middle East, and Africa"
+  },
+  {
+    "id": "eu-north-1",
+    "display_name": "Stockholm",
+    "continent": "EU",
+    "description": "This region is recommended to serve users in Stockholm and north Europe"
+  },
+  {
+    "id": "eu-west-1",
+    "display_name": "Ireland",
+    "continent": "EU",
+    "description": "This region is recommended to serve users in Ireland, the United Kingdom, and Iceland"
+  },
+  {
+    "id": "eu-west-2",
+    "display_name": "London",
+    "continent": "EU",
+    "description": "This region is recommended to serve users in Ireland, the United Kingdom, and Iceland"
+  },
+  {
+    "id": "eu-west-3",
+    "display_name": "Paris",
+    "continent": "EU",
+    "description": "This region is recommended to serve users in France and central Europe"
+  },
+  {
+    "id": "us-east-1",
+    "display_name": "Virginia",
+    "continent": "NA",
+    "description": "This region is recommended to serve users in the eastern United States"
+  },
+  {
+    "id": "us-east-2",
+    "display_name": "Ohio",
+    "continent": "NA",
+    "description": "This region is recommended to serve users in the eastern United States"
+  },
+  {
+    "id": "us-west-2",
+    "display_name": "Oregon",
+    "continent": "NA",
+    "description": "This region is recommended to serve users in the northwestern United States, Alaska, and western Canada"
+  }
+]
